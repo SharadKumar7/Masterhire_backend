@@ -1,5 +1,5 @@
 import User from "../models/User.js";
-import RecentlyViewedProfile from "../models/RecentlyViewedProfile.js";
+import RecentlyViewedProfile from "../models/recentlyViewedProfile.js";
 
 export const searchFreelancers = async (req, res) => {
   try {
