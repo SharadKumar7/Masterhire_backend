@@ -35,12 +35,14 @@ const io = new SocketIO(server, {
 
 initSocket(io);
 
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://masterhire.netlify.app"
+];
+
 app.use(
   cors({
-    origin: [
-      "http://localhost:5173",
-      "https://hungry-emus-camp.loca.lt",
-    ],
+    origin: allowedOrigins,
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     allowedHeaders: ["Content-Type", "Authorization"],
