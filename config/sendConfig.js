@@ -1,19 +1,19 @@
-import { TransactionalEmailsApi, SendSmtpEmail } from "@getbrevo/brevo";
+import { Brevo } from "@getbrevo/brevo";
 
 const sendEmail = async (to, subject, text) => {
-  const apiInstance = new TransactionalEmailsApi();
-  apiInstance.authentications["apiKey"].apiKey = process.env.BREVO_API_KEY;
+  const client = new Brevo({
+    apiKey: process.env.BREVO_API_KEY,
+  });
 
-  const sendSmtpEmail = new SendSmtpEmail();
-  sendSmtpEmail.subject = subject;
-  sendSmtpEmail.textContent = text;
-  sendSmtpEmail.sender = {
-    name: "MasterHire",
-    email: "123sharadkumar6@gmail.com",
-  };
-  sendSmtpEmail.to = [{ email: to }];
-
-  await apiInstance.sendTransacEmail(sendSmtpEmail);
+  await client.transactionalEmails.send({
+    subject,
+    textContent: text,
+    sender: {
+      name: "MasterHire",
+      email: "123sharadkumar6@gmail.com",
+    },
+    to: [{ email: to }],
+  });
 };
 
 export default sendEmail;
