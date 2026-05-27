@@ -1,22 +1,19 @@
-import nodemailer from "nodemailer";
+import * as brevo from "@getbrevo/brevo";
 
 const sendEmail = async (to, subject, text) => {
-  const transporter = nodemailer.createTransport({
-    host: "smtp-relay.brevo.com",
-    port: 465,
-    secure: false,
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS,
-    },
-  });
+  const apiInstance = new brevo.TransactionalEmailsApi();
+  apiInstance.authentications["apiKey"].apiKey = process.env.BREVO_API_KEY;
 
-  await transporter.sendMail({
-    from: '"MasterHire" <123sharadkumar6@gmail.com>',  // ← verified sender
-    to,
-    subject,
-    text,
-  });
+  const sendSmtpEmail = new brevo.SendSmtpEmail();
+  sendSmtpEmail.subject = subject;
+  sendSmtpEmail.textContent = text;
+  sendSmtpEmail.sender = {
+    name: "MasterHire",
+    email: "123sharadkumar6@gmail.com",
+  };
+  sendSmtpEmail.to = [{ email: to }];
+
+  await apiInstance.sendTransacEmail(sendSmtpEmail);
 };
 
 export default sendEmail;
