@@ -37,7 +37,8 @@ initSocket(io);
 
 const allowedOrigins = [
   "http://localhost:5173",
-  "https://masterhire.netlify.app"
+  "https://masterhire.netlify.app",
+  "https://masterhirebackend-production.up.railway.app",
 ];
 
 app.use(
