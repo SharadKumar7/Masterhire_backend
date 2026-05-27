@@ -2,8 +2,8 @@ import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
 import http from "http";
-import path from "path";                          // ← ADD
-import { fileURLToPath } from "url";              // ← ADD
+import path from "path";
+import { fileURLToPath } from "url";
 import { Server as SocketIO } from "socket.io";
 
 import authRoutes from "./routes/authRoutes.js";
@@ -20,41 +20,28 @@ import initSocket from "./socket/index.js";
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);  // ← ADD
-const __dirname  = path.dirname(__filename);         // ← ADD
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
 
 const app    = express();
 const server = http.createServer(app);
 
 const io = new SocketIO(server, {
   cors: {
-    origin: process.env.CLIENT_URL || "http://localhost:5173",
-    credentials: true,
+    origin: "*",
+    credentials: false,
   },
 });
 
 initSocket(io);
 
-const allowedOrigins = [
-  "http://localhost:5173",
-  "https://masterhire.netlify.app",
-  "https://masterhirebackend-production.up.railway.app",
-];
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+}));
 
-app.use(
-  cors({
-    origin: "*",
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],  // ← OPTIONS add kiya
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
-
-app.options("*", cors());  // ← yeh add karo
-
-// ── Static uploads ───────────────────────────────────────────── ← ADD
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
-
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
