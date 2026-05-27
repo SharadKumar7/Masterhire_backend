@@ -1,11 +1,11 @@
-import { Brevo } from "@getbrevo/brevo";
+import { BrevoClient } from "@getbrevo/brevo";
 
 const sendEmail = async (to, subject, text) => {
-  const client = new Brevo({
+  const client = new BrevoClient({
     apiKey: process.env.BREVO_API_KEY,
   });
 
-  await client.transactionalEmails.send({
+  await client.transactionalEmails.sendTransacEmail({
     subject,
     textContent: text,
     sender: {
