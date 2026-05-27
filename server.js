@@ -45,10 +45,12 @@ app.use(
   cors({
     origin: allowedOrigins,
     credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],  // ← OPTIONS add kiya
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
+
+app.options("*", cors());  // ← yeh add karo
 
 // ── Static uploads ───────────────────────────────────────────── ← ADD
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
