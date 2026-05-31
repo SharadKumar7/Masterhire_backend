@@ -1,10 +1,22 @@
-// ─── projectRoutes.js ─────────────────────────────────────────────────────────
-import express from "express";
-import { protect } from "../middleware/authMiddleware.js"; // apna auth middleware
+// ─── routes/projectRoutes.js ──────────────────────────────────────────────────
+// Mount in app.js:
+//   import projectRoutes from "./routes/projectRoutes.js";
+//   app.use("/api", projectRoutes);
+//
+// Also serve uploads:
+//   app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+//
+// Make sure uploads/messages/ folder exists:
+//   mkdir -p uploads/messages
 
+import express from "express";
+import { protect } from "../middleware/authMiddleware.js"; // your existing auth middleware
 import {
+  upload,
+  // ── Shared ──────────────────────────────────────────────────────────────────
   getProjectDetails,
   deleteJob,
+  // ── Client ──────────────────────────────────────────────────────────────────
   getClientJobApplications,
   updateApplicationStatus,
   getNegotiationHistory,
@@ -12,31 +24,34 @@ import {
   getConversations,
   getMessages,
   sendMessage,
+  // ── Freelancer ───────────────────────────────────────────────────────────────
   getFreelancerApplication,
   negotiateApplication,
-} from "../controllers/applicationController.js";
+  getFreelancerMessages,
+  sendFreelancerMessage,
+  deleteFreelancerMessages,
+} from "../controllers//applicationController.js";
 
 const router = express.Router();
 
-// ── Job ───────────────────────────────────────────────────────────────────────
-router.get( "/job-details/:jobId",              protect, getProjectDetails);
-router.delete("/client/job/:jobId",             protect, deleteJob);          // ← NEW
+// ── Shared ────────────────────────────────────────────────────────────────────
+router.get("/job-details/:jobId",        protect, getProjectDetails);
+router.delete("/jobs/:jobId",            protect, deleteJob);
 
-// ── Applications (client) ─────────────────────────────────────────────────────
-router.get(  "/client/job-applications/:jobId", protect, getClientJobApplications);
-router.patch("/client/:applicationId/status",   protect, updateApplicationStatus);
-
-// ── Negotiation ───────────────────────────────────────────────────────────────
-router.get( "/client/negotiation/:applicationId", protect, getNegotiationHistory);
-router.post("/client/negotiation",                protect, submitClientNegotiation);
-
-// ── Messages (client) ─────────────────────────────────────────────────────────
-router.get( "/client/messages/conversations",   protect, getConversations);   // ?jobId=
-router.get( "/client/messages/:freelancerId",   protect, getMessages);        // ?jobId=
-router.post("/client/messages",                 protect, sendMessage);
+// ── Client ────────────────────────────────────────────────────────────────────
+router.get("/client/job-applications/:jobId",         protect, getClientJobApplications);
+router.patch("/client/:applicationId/status",         protect, updateApplicationStatus);
+router.get("/client/negotiation/:applicationId",      protect, getNegotiationHistory);
+router.post("/client/negotiation",                    protect, submitClientNegotiation);
+router.get("/client/messages/conversations",          protect, getConversations);        // ?jobId=
+router.get("/client/messages/:freelancerId",          protect, getMessages);             // ?jobId=
+router.post("/client/messages",                       protect, sendMessage);
 
 // ── Freelancer ────────────────────────────────────────────────────────────────
-router.get(  "/freelancer/application/:jobId",              protect, getFreelancerApplication);
-router.patch("/application/:applicationId/negotiate",       protect, negotiateApplication);
+router.get("/freelancer/application/:jobId",                        protect, getFreelancerApplication);
+router.patch("/freelancer/application/:applicationId/negotiate",    protect, negotiateApplication);
+router.get("/freelancer/messages/:jobId",                           protect, getFreelancerMessages);
+router.post("/freelancer/messages",                                 protect, upload.single("file"), sendFreelancerMessage);
+router.delete("/freelancer/messages/:jobId",                        protect, deleteFreelancerMessages);
 
 export default router;

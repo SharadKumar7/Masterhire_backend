@@ -6,6 +6,8 @@ import { completeProfile } from "../controllers/authController.js";
 import { loginUser } from "../controllers/authController.js";
 import { getMe } from "../controllers/authController.js";
 import { protect } from "../middleware/authMiddleware.js";
+import { googleAuth } from "../controllers/authController.js";
+import { forgotPassword } from "../controllers/forgetPassword.js";
 
 
 
@@ -22,5 +24,9 @@ router.post("/complete-profile", completeProfile);
 router.post("/login", loginUser);
 
 router.get("/me", protect, getMe);
+
+router.post("/google-auth", googleAuth);
+
+router.post("/forgot-password", forgotPassword);
 
 export default router;

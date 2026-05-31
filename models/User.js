@@ -13,10 +13,15 @@ const userSchema = new mongoose.Schema(
       unique: true,
     },
 
+    googleId: {
+  type: String,
+  default: null,
+},
+
     password: {
-      type: String,
-      required: true,
-    },
+  type: String,
+  default: null,
+},
 
     role: {
       type: String,

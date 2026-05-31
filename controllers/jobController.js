@@ -203,6 +203,10 @@ export const getFreelancerCurrentJobs = async (req, res) => {
 };
 
 
+// ─── ONLY THIS FUNCTION CHANGED in jobController.js ─────────────────────────
+// Replace your existing getJobById with this one.
+// Everything else in the file stays exactly the same.
+
 export const getJobById = async (req, res) => {
   try {
     const userId = req.user?.userId;
@@ -213,22 +217,18 @@ export const getJobById = async (req, res) => {
       return res.status(404).json({ success: false, message: "Job not found" });
     }
 
-    let isSaved = false;
-    let isApplied = false;
+    let isSaved    = false;
+    let isApplied  = false;
+    let isRejected = false; // ✅ NEW
 
     if (userId) {
-      // ✅ Query SavedJob collection directly
-      const savedJob = await SavedJob.findOne({
-        user: userId,
-        job: jobId,
-      });
+      const savedJob = await SavedJob.findOne({ user: userId, job: jobId });
       isSaved = !!savedJob;
 
-      const applied = await Application.findOne({
-        user: userId,
-        job: jobId,
-      });
-      isApplied = !!applied;
+      const applied = await Application.findOne({ user: userId, job: jobId });
+      isApplied  = !!applied;
+      // ✅ isRejected: applied but status is rejected
+      isRejected = applied?.status === "rejected";
     }
 
     res.json({
@@ -237,6 +237,7 @@ export const getJobById = async (req, res) => {
         ...job.toObject(),
         isSaved,
         isApplied,
+        isRejected, // ✅ NEW
       },
     });
   } catch (error) {

@@ -3,6 +3,98 @@ import sendEmail from "../config/sendConfig.js";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import Job from "../models/Jobs.js";
+import { OAuth2Client } from "google-auth-library";
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+export const googleAuth = async (req, res) => {
+  try {
+    const { credential, role } = req.body;
+
+    if (!credential) {
+      return res.status(400).json({
+        message: "Google credential required",
+      });
+    }
+
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+
+    const payload = ticket.getPayload();
+
+    const { sub, email, given_name, family_name, picture } = payload;
+
+    let user = await User.findOne({ email });
+
+    // =========================
+    // NEW USER
+    // =========================
+    if (!user) {
+      if (!role) {
+        return res.status(400).json({
+          message: "Role is required for first-time Google signup",
+        });
+      }
+
+      user = await User.create({
+        firstName: given_name,
+        lastName: family_name,
+        email,
+        photo: picture,
+        role,
+        googleId: sub,
+        isVerified: true,
+        isProfileComplete: false,
+      });
+    }
+
+    // =========================
+    // LINK GOOGLE ACCOUNT
+    // =========================
+    if (!user.googleId) {
+      user.googleId = sub;
+      user.isVerified = true;
+      await user.save();
+    }
+
+    user.lastSignIn = new Date();
+    await user.save();
+
+    const token = jwt.sign(
+      {
+        userId: user._id,
+        role: user.role,
+        tokenVersion: user.tokenVersion,
+      },
+      process.env.JWT_SECRET,
+      {
+        expiresIn: "7d",
+      },
+    );
+
+    return res.json({
+      success: true,
+      token,
+
+      user: {
+        userId: user._id,
+        role: user.role,
+        fullName: `${user.firstName} ${user.lastName}`,
+        email: user.email,
+        photo: user.photo,
+        isProfileComplete: user.isProfileComplete,
+      },
+    });
+  } catch (error) {
+    console.log("GOOGLE AUTH ERROR:", error);
+
+    return res.status(500).json({
+      message: "Google authentication failed",
+    });
+  }
+};
 
 // ================= SEND OTP =================
 export const sendOtp = async (req, res) => {
@@ -45,12 +137,31 @@ export const sendOtp = async (req, res) => {
 
     await sendEmail(
       email,
-      "Your OTP Code",
-      `Your OTP is ${otp}. It is valid for 5 minutes.`
+      "Verify Your MasterHire Account",
+      `Hi there,
+
+Thank you for signing up with MasterHire — India's trusted freelance platform.
+
+To complete your registration, please use the One-Time Password (OTP) below:
+
+━━━━━━━━━━━━━━━━━━━━
+        ${otp}
+━━━━━━━━━━━━━━━━━━━━
+
+This OTP is valid for 5 minutes. Do not share it with anyone.
+
+If you did not request this, please ignore this email or contact our support team immediately.
+
+Warm regards,
+The MasterHire Team
+support@masterhire.in | https://masterhire.netlify.app
+
+─────────────────────────────────────────
+© 2026 MasterHire. All rights reserved.
+This is an automated message. Please do not reply to this email.`,
     );
 
     res.json({ message: "OTP sent to email" });
-
   } catch (error) {
     console.log("SEND OTP ERROR:", error);
     res.status(500).json({ message: "Server error" });
@@ -73,7 +184,9 @@ export const verifyOtp = async (req, res) => {
 
     if (!user.otpExpiry || user.otpExpiry < new Date()) {
       await User.deleteOne({ email });
-      return res.status(400).json({ message: "OTP expired. Please signup again." });
+      return res
+        .status(400)
+        .json({ message: "OTP expired. Please signup again." });
     }
 
     if (user.otp !== otp) {
@@ -87,7 +200,6 @@ export const verifyOtp = async (req, res) => {
     await user.save();
 
     res.json({ message: "OTP verified successfully" });
-
   } catch (error) {
     console.log("VERIFY OTP ERROR:", error);
     res.status(500).json({ message: "Server error" });
@@ -119,12 +231,29 @@ export const resendOtp = async (req, res) => {
 
     await sendEmail(
       email,
-      "Your New OTP",
-      `Your new OTP is ${otp}. Valid for 5 minutes.`
+      "Your New OTP — MasterHire",
+      `Hi there,
+
+You requested a new OTP for your MasterHire account.
+
+━━━━━━━━━━━━━━━━━━━━
+        ${otp}
+━━━━━━━━━━━━━━━━━━━━
+
+This OTP is valid for 5 minutes. Do not share it with anyone.
+
+If you did not request this, please secure your account immediately by contacting our support team.
+
+Warm regards,
+The MasterHire Team
+support@masterhire.in | www.masterhire.in
+
+─────────────────────────────────────────
+© 2026 MasterHire. All rights reserved.
+This is an automated message. Please do not reply to this email.`,
     );
 
     res.json({ message: "OTP resent successfully" });
-
   } catch (error) {
     console.log("RESEND OTP ERROR:", error);
     res.status(500).json({ message: "Server error" });
@@ -193,9 +322,9 @@ export const completeProfile = async (req, res) => {
     };
 
     user.domains = {
-  name: selectedCategory,
-  subDomains: selectedSpecialities,
-   };
+      name: selectedCategory,
+      subDomains: selectedSpecialities,
+    };
 
     user.skills = skills;
     user.title = title;
@@ -213,7 +342,6 @@ export const completeProfile = async (req, res) => {
       message: "Signup completed successfully",
       userId: user._id,
     });
-
   } catch (error) {
     console.log("COMPLETE PROFILE ERROR:", error);
     res.status(500).json({ message: "Server error" });
@@ -232,7 +360,9 @@ export const loginUser = async (req, res) => {
     }
 
     if (!user.isVerified) {
-      return res.status(400).json({ message: "Please verify your account first" });
+      return res
+        .status(400)
+        .json({ message: "Please verify your account first" });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
@@ -247,7 +377,7 @@ export const loginUser = async (req, res) => {
         role: user.role,
       },
       process.env.JWT_SECRET,
-      { expiresIn: "7d" }
+      { expiresIn: "7d" },
     );
 
     res.json({
@@ -258,7 +388,6 @@ export const loginUser = async (req, res) => {
       fullName: `${user.firstName} ${user.lastName}`,
       isProfileComplete: user.isProfileComplete, // optional
     });
-
   } catch (error) {
     console.log("LOGIN ERROR:", error);
     res.status(500).json({ message: "Server error" });
@@ -267,7 +396,9 @@ export const loginUser = async (req, res) => {
 
 export const getMe = async (req, res) => {
   try {
-    const user = await User.findById(req.user.userId).select("-password -otp -otpExpiry");
+    const user = await User.findById(req.user.userId).select(
+      "-password -otp -otpExpiry",
+    );
 
     if (!user) {
       return res.status(404).json({ message: "User not found" });
@@ -279,25 +410,15 @@ export const getMe = async (req, res) => {
       fullName: `${user.firstName} ${user.lastName}`,
       email: user.email,
     });
-
   } catch (error) {
     res.status(500).json({ message: "Server error" });
   }
 };
 
-
-
 export const filterJobs = async (req, res) => {
   try {
-    const {
-      category,
-      subcategory,
-      rating,
-      language,
-      success,
-      skill,
-      english,
-    } = req.query;
+    const { category, subcategory, rating, language, success, skill, english } =
+      req.query;
 
     let query = { status: "open" };
 
@@ -339,7 +460,6 @@ export const filterJobs = async (req, res) => {
     const jobs = await Job.find(query).sort({ createdAt: -1 });
 
     res.json(jobs);
-
   } catch (error) {
     console.log("FILTER ERROR:", error);
     res.status(500).json({ message: "Server error" });
