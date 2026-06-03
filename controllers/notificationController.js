@@ -1,4 +1,4 @@
-import Notification from "../models/Notification.js";
+import Notification from "../models/notification.js";
 
 // ─── GET /api/notifications ───────────────────────────────────────────────────
 // Get all notifications for logged-in user
