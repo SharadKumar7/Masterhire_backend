@@ -17,6 +17,8 @@ import freelancerAccountRoutes from "./routes/freelancerAccountRoutes.js";
 import clientAccountRoutes from "./routes/clientAccountRoutes.js";
 import clientWorkspaceRoute from "./routes/clientWorkspaceRoutes.js";
 import initSocket from "./socket/index.js";
+import transactionRoutes from "./routes/transactionRoutes.js";
+import projectHistoryRoutes from "./routes/projectHistoryRoutes.js";
 
 dotenv.config();
 
@@ -56,6 +58,9 @@ app.use("/api",                     applicationRoutes);
 app.use("/api/freelancer/settings", freelancerAccountRoutes);
 app.use("/api/client/settings",     clientAccountRoutes);
 app.use("/workspace/api",           clientWorkspaceRoute);
+app.use("/api",                     transactionRoutes);
+app.use("/api",                     projectHistoryRoutes);
+
 
 app.get("/", (req, res) => res.send("API is running"));
 

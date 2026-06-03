@@ -2,14 +2,20 @@ import Job from "../models/Jobs.js";
 import User from "../models/User.js";
 import SavedJob from "../models/SavedJob.js"; // ✅ NEW
 import Application from "../models/applicationJob.js";
-import RecentlyViewedJob from "../models/recentlyViewJob.js"; // ✅ NEW
+import RecentlyViewedJob from "../models/recentlyViewJob.js";
+import mongoose from "mongoose"; // ✅ NEW
+
+import { getKeywordsForCategory } from "../models/JobKeyMap.js";
+// import Job from "../models/Job.js";      // apna path use karo
 
 export const searchJobs = async (req, res) => {
   try {
     const {
       search,
       category,
-      experienceLevel,
+      experience,        // frontend "experience" bhejta hai
+      experienceLevel,   // fallback
+      clientHistory,
       minBudget,
       maxBudget,
       consultation,
@@ -17,67 +23,118 @@ export const searchJobs = async (req, res) => {
     } = req.query;
 
     let query = {
-      status: "published", // only live jobs
+      status: "published",
     };
 
-    let conditions = [];
+    // ─── 🔍 SEARCH BAR ────────────────────────────────────────────────────────
+    // JobId exact match, title, skills, description fuzzy match
+    if (search && search.trim()) {
+      const s = search.trim();
 
-    // 🔍 SEARCH (title words)
-    if (search) {
-      const words = search.split(" ");
-      const regexArray = words.map((word) => ({
-        title: { $regex: word, $options: "i" },
-      }));
-      conditions.push(...regexArray);
+      // JobId exact match (JOB-345 format)
+      if (s.toUpperCase().startsWith("JOB-")) {
+        query.jobId = { $regex: `^${s}$`, $options: "i" };
+      } else {
+        // Title + Skills + Description mein search
+        query.$or = [
+          { title:       { $regex: s, $options: "i" } },
+          { skills:      { $elemMatch: { $regex: s, $options: "i" } } },
+          { description: { $regex: s, $options: "i" } },
+        ];
+      }
     }
 
-    // 📂 CATEGORY
+    // ─── 📂 CATEGORY ─────────────────────────────────────────────────────────
+    // Category field nahi hai schema mein — title + skills se match karo
     if (category && category !== "All") {
-      conditions.push({
-        category: { $regex: category, $options: "i" },
-      });
+      const keywords = getKeywordsForCategory(category);
+
+      if (keywords.length > 0) {
+        const categoryConditions = [
+          // Title mein koi bhi keyword match ho
+          ...keywords.map((kw) => ({
+            title: { $regex: kw, $options: "i" },
+          })),
+          // Skills mein koi bhi keyword match ho
+          ...keywords.map((kw) => ({
+            skills: { $elemMatch: { $regex: kw, $options: "i" } },
+          })),
+        ];
+
+        // Agar search $or already hai toh category ko $and se add karo
+        if (query.$or) {
+          query.$and = [
+            { $or: query.$or },
+            { $or: categoryConditions },
+          ];
+          delete query.$or;
+        } else {
+          query.$or = categoryConditions;
+        }
+      }
     }
 
-    // 💼 EXPERIENCE
-    if (experienceLevel && experienceLevel !== "All") {
-      query.experienceLevel = experienceLevel;
+    // ─── 💼 EXPERIENCE LEVEL ─────────────────────────────────────────────────
+    const expLevel = experience || experienceLevel;
+    if (expLevel && expLevel !== "All") {
+      query.experienceLevel = { $regex: expLevel, $options: "i" };
     }
 
-    // 💰 BUDGET RANGE
+    // ─── 👤 CLIENT HISTORY ────────────────────────────────────────────────────
+    // clientId ke through client ka totalJobs check karo
+    if (clientHistory && clientHistory !== "All") {
+      let hiresCondition = {};
+
+      if (clientHistory === "No hires") {
+        hiresCondition = { $or: [{ totalJobs: 0 }, { totalJobs: { $exists: false } }] };
+      } else if (clientHistory === "1 to 9 hires") {
+        hiresCondition = { totalJobs: { $gte: 1, $lte: 9 } };
+      } else if (clientHistory === "10+ hires") {
+        hiresCondition = { totalJobs: { $gte: 10 } };
+      }
+
+      // Client users nikalo jo condition match kare
+      const matchingClients = await mongoose.model("User").find(
+        { role: "client", ...hiresCondition },
+        { _id: 1 }
+      ).lean();
+
+      const clientIds = matchingClients.map((c) => c._id);
+      query.clientId = { $in: clientIds };
+    }
+
+    // ─── 💰 BUDGET RANGE ──────────────────────────────────────────────────────
     if (minBudget || maxBudget) {
       query.budget = {};
       if (minBudget) query.budget.$gte = Number(minBudget);
       if (maxBudget) query.budget.$lte = Number(maxBudget);
     }
 
-    // 🤝 CONSULTATION
+    // ─── 🤝 CONSULTATION / NEGOTIATION ───────────────────────────────────────
     if (consultation === "true") {
       query.allowNegotiation = true;
     }
 
-    // 🔥 FETCH ALL MATCHED JOBS FIRST
-    let jobs = await Job.find(
-      conditions.length > 0 ? { ...query, $or: conditions } : query
-    ).sort({ createdAt: -1 });
+    // ─── 📦 FETCH ─────────────────────────────────────────────────────────────
+    let jobs = await Job.find(query)
+      .populate("clientId", "firstName lastName totalJobs photo")
+      .sort({ createdAt: -1 })
+      .lean();
 
-    // ⏳ PROJECT LENGTH (DEADLINE LOGIC)
+    // ─── ⏳ PROJECT LENGTH (deadline based filter) ────────────────────────────
     if (projectLength && projectLength !== "All") {
       const now = new Date();
 
       jobs = jobs.filter((job) => {
         if (!job.deadline) return false;
-
         const deadline = new Date(job.deadline);
         const diffDays = (deadline - now) / (1000 * 60 * 60 * 24);
 
-        if (projectLength === "Less than 1 week") return diffDays < 7;
-        if (projectLength === "Less than 1 month") return diffDays < 30;
-        if (projectLength === "1 to 3 months")
-          return diffDays >= 30 && diffDays <= 90;
-        if (projectLength === "3 to 6 months")
-          return diffDays > 90 && diffDays <= 180;
+        if (projectLength === "Less than 1 week")   return diffDays < 7;
+        if (projectLength === "Less than 1 month")  return diffDays < 30;
+        if (projectLength === "1 to 3 months")      return diffDays >= 30 && diffDays <= 90;
+        if (projectLength === "3 to 6 months")      return diffDays > 90  && diffDays <= 180;
         if (projectLength === "More than 6 months") return diffDays > 180;
-
         return true;
       });
     }

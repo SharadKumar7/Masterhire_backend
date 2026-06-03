@@ -1,8 +1,88 @@
 import User from "../models/User.js";
 import RecentlyViewedProfile from "../models/recentlyViewedProfile.js";
+import SavedProfile from "../models/savedProfiles.js";
 
+import { getDbCategoriesFromSearch ,CATEGORY_KEYWORD_MAP } from "../models/KeywordMap.js";
+
+
+// import User from "../models/User.js"; // apna path use karo
+
+export const getCategoryCounts = async (req, res) => {
+  try {
+    // Ek baar mein saare freelancers ke domains fetch karo
+    const freelancers = await User.find(
+      { role: "freelancer" },
+      { domains: 1 } // sirf domains field chahiye
+    ).lean();
+
+    const counts = {};
+
+    for (const [categoryName, data] of Object.entries(CATEGORY_KEYWORD_MAP)) {
+      const { dbCategories, dbSubCategories } = data;
+
+      const count = freelancers.filter((user) => {
+        if (!user.domains || user.domains.length === 0) return false;
+
+        return user.domains.some((domain) => {
+          // Main category match
+          const mainMatch = dbCategories.some(
+            (dbCat) =>
+              domain.name?.toLowerCase().includes(dbCat.toLowerCase()) ||
+              dbCat.toLowerCase().includes(domain.name?.toLowerCase())
+          );
+
+          if (mainMatch) return true;
+
+          // Subcategory match
+          if (!domain.subDomains || domain.subDomains.length === 0)
+            return false;
+
+          return domain.subDomains.some((sub) =>
+            dbSubCategories.some(
+              (dbSub) =>
+                sub?.toLowerCase().includes(dbSub.toLowerCase()) ||
+                dbSub.toLowerCase().includes(sub?.toLowerCase())
+            )
+          );
+        });
+      }).length;
+
+      counts[categoryName] = count;
+    }
+
+    res.json({ success: true, counts });
+  } catch (error) {
+    console.error("CATEGORY COUNTS ERROR:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+// import User from "../models/User.js";         // apna path use karo
+// import SavedProfile from "../models/SavedProfile.js"; // apna path use karo
+
+// ─── Helper: single freelancer format karo ───────────────────────────────────
+const formatFreelancer = (user, savedProfileIds) => ({
+  id: user._id,
+  image: user.photo,
+  fullName: `${user.firstName} ${user.lastName}`,
+  domain: user.domains.map((d) => d.name).join(", "),
+  skills: user.skills,
+  location: `${user.address?.city || ""}, ${user.address?.state || ""}`
+    .trim()
+    .replace(/^,|,$/g, ""),
+  totalJobs: user.totalJobs || 0,
+  jobSuccess: user.jobSuccess || 0,
+  totalEarnings: user.totalEarnings || 0,
+  rating: user.rating || 0,
+  title: user.title || "Unknown Title",
+  available: user.available || false,
+  consultation: user.consultation || false,
+  isSaved: savedProfileIds.has(user._id.toString()),
+});
+
+// ─── Main Controller ──────────────────────────────────────────────────────────
 export const searchFreelancers = async (req, res) => {
   try {
+    const userId = req.user?.userId;
     const {
       category,
       subcategory,
@@ -13,32 +93,119 @@ export const searchFreelancers = async (req, res) => {
       language,
       consultation,
       available,
+      search, // ← search bar ka param
     } = req.query;
 
-    let query = {
-      role: "freelancer",
-    };
+    // ── Saved profiles ────────────────────────────────────────────────────────
+    let savedProfileIds = new Set();
+    if (userId) {
+      const savedProfiles = await SavedProfile.find({
+        savedBy: userId,
+      }).select("profile");
+      savedProfileIds = new Set(
+        savedProfiles.map((item) => item.profile.toString())
+      );
+    }
 
-    // 📂 CATEGORY (domain array)
+    // ── Email exact match (search bar only) ───────────────────────────────────
+    if (search && search.trim()) {
+      const s = search.trim();
+
+      // Email jaisa lagta hai toh exact match karo
+      if (s.includes("@")) {
+        const emailMatch = await User.findOne({
+          role: "freelancer",
+          email: { $regex: `^${s}$`, $options: "i" },
+        });
+
+        if (emailMatch) {
+          return res.json({
+            success: true,
+            count: 1,
+            freelancers: [formatFreelancer(emailMatch, savedProfileIds)],
+          });
+        }
+
+        // Email tha but match nahi mila
+        return res.json({ success: true, count: 0, freelancers: [] });
+      }
+    }
+
+    // ── Build main query ──────────────────────────────────────────────────────
+    let query = { role: "freelancer" };
+
+    // 🔍 SEARCH BAR — title + skills + category keyword match
+    if (search && search.trim()) {
+      const s = search.trim();
+
+      // Keyword map se DB categories nikalo
+      const { dbCategories, dbSubCategories } = getDbCategoriesFromSearch(s);
+
+      const orConditions = [
+        // Title mein search
+        { title: { $regex: s, $options: "i" } },
+
+        // Skills mein fuzzy search (node → nodejs, Node.js, NodeJS sab match)
+        { skills: { $elemMatch: { $regex: s, $options: "i" } } },
+      ];
+
+      // DB categories match
+      if (dbCategories.length > 0) {
+        orConditions.push({
+          domains: {
+            $elemMatch: {
+              name: { $in: dbCategories },
+            },
+          },
+        });
+      }
+
+      // DB subcategories match
+      if (dbSubCategories.length > 0) {
+        orConditions.push({
+          domains: {
+            $elemMatch: {
+              subDomains: {
+                $elemMatch: { $in: dbSubCategories },
+              },
+            },
+          },
+        });
+      }
+
+      query.$or = orConditions;
+    }
+
+    // 📂 CATEGORY filter (dropdown se)
     if (category && category !== "All") {
-  query.domains = {
-    $elemMatch: {
-      name: { $regex: category, $options: "i" },
-    },
-  };
-}
+      query.domains = {
+        $elemMatch: {
+          name: { $regex: category, $options: "i" },
+        },
+      };
+    }
 
-    // 📂 SUBCATEGORY (if stored separately)
+    // 📂 SUBCATEGORY filter — category ke saath merge karo
     if (subcategory && subcategory !== "All") {
-  query.domains = {
-    $elemMatch: {
-      subDomains: { $regex: subcategory, $options: "i" },
-    },
-  };
-}
+      if (query.domains?.$elemMatch) {
+        // Category already set hai, subcategory add karo same elemMatch mein
+        query.domains.$elemMatch.subDomains = {
+          $elemMatch: { $regex: subcategory, $options: "i" },
+        };
+      } else {
+        query.domains = {
+          $elemMatch: {
+            subDomains: {
+              $elemMatch: { $regex: subcategory, $options: "i" },
+            },
+          },
+        };
+      }
+    }
 
-    // 🧠 SKILLS (array match)
+    // 🧠 SKILLS filter (dropdown se)
     if (skill && skill !== "All") {
+      // Fuzzy match — node → nodejs, Node.js sab match hoga
       query.skills = { $elemMatch: { $regex: skill, $options: "i" } };
     }
 
@@ -49,25 +216,18 @@ export const searchFreelancers = async (req, res) => {
 
     // 📊 JOB SUCCESS
     if (jobSuccess && jobSuccess !== "All") {
-      query.jobSuccess = { $gte: Number(jobSuccess) };
+      const num = parseInt(jobSuccess);
+      if (!isNaN(num)) query.jobSuccess = { $gte: num };
     }
 
     // 🌐 LANGUAGE FILTER
     let languageFilter = [];
-
     if (englishLevel && englishLevel !== "All") {
-      languageFilter.push({
-        name: "English",
-        level: englishLevel,
-      });
+      languageFilter.push({ name: "English", level: englishLevel });
     }
-
     if (language && language !== "All") {
-      languageFilter.push({
-        name: language,
-      });
+      languageFilter.push({ name: language });
     }
-
     if (languageFilter.length > 0) {
       query.languages = {
         $elemMatch: { $or: languageFilter },
@@ -84,32 +244,12 @@ export const searchFreelancers = async (req, res) => {
       query.available = true;
     }
 
+    // ── Fetch + sort ──────────────────────────────────────────────────────────
     const freelancers = await User.find(query).sort({ rating: -1 });
 
-    // 🎯 FORMAT RESPONSE
-    const formattedFreelancers = freelancers.map((user) => ({
-      id: user._id,
-
-      image: user.photo,
-      fullName: `${user.firstName} ${user.lastName}`,
-
-      domain: user.domains.map((d) => d.name).join(", "),
-      skills: user.skills,
-
-      location: `${user.address?.city || ""}, ${user.address?.state || ""}`.trim().replace(/^,|,$/g, ""),
-
-
-      totalJobs: user.totalJobs || 0,
-      jobSuccess: user.jobSuccess || 0,
-      totalEarnings: user.totalEarnings || 0,
-
-      rating: user.rating || 0,
-
-      title: user.title || "Unknown Title",
-
-      available: user.available || false,
-      consultation: user.consultation || false,
-    }));
+    const formattedFreelancers = freelancers.map((user) =>
+      formatFreelancer(user, savedProfileIds)
+    );
 
     res.json({
       success: true,
@@ -122,9 +262,9 @@ export const searchFreelancers = async (req, res) => {
   }
 };
 
-
 export const getTopFreelancers = async (req, res) => {
   try {
+    const userId = req.user?.userId;
     // 👉 Step 1: Fetch freelancers (limit for performance)
     const freelancers = await User.find({ role: "freelancer" }).limit(50);
 
@@ -136,16 +276,21 @@ export const getTopFreelancers = async (req, res) => {
       const earnings = user.totalEarnings || 0;
 
       const score =
-        rating * 0.4 +
-        jobSuccess * 0.3 +
-        totalJobs * 0.2 +
-        earnings * 0.1;
+        rating * 0.4 + jobSuccess * 0.3 + totalJobs * 0.2 + earnings * 0.1;
 
       return {
         user,
         score,
       };
     });
+
+    const savedProfiles = await SavedProfile.find({
+      savedBy: userId,
+    }).select("profile");
+
+    const savedProfileIds = new Set(
+      savedProfiles.map((item) => item.profile.toString()),
+    );
 
     // 👉 Step 3: Sort by score (highest first)
     rankedFreelancers.sort((a, b) => b.score - a.score);
@@ -156,11 +301,12 @@ export const getTopFreelancers = async (req, res) => {
     // 👉 Step 5: Format response
     const formatted = topFreelancers.map(({ user }) => ({
       id: user._id,
-      image: user.photo,
-      fullName: `${user.firstName || ""} ${user.lastName || ""}`.trim() || "User",
+      photo: user.photo,
+      fullName:
+        `${user.firstName || ""} ${user.lastName || ""}`.trim() || "User",
 
-      domain: user.domains?.map((d) => d.name) || [],
-      skills: user.skills || [],
+      title: user.title || "",
+      bio: user.bio || "",
 
       rating: user.rating || 0,
       jobSuccess: user.jobSuccess || 0,
@@ -168,6 +314,8 @@ export const getTopFreelancers = async (req, res) => {
 
       available: user.available || false,
       consultation: user.consultation || false,
+
+      isSaved: savedProfileIds.has(user._id.toString()),
     }));
 
     res.json({
@@ -180,7 +328,6 @@ export const getTopFreelancers = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
-
 
 // @desc    Track a viewed profile (Create/Update)
 // @route   POST /api/profiles/:id/view
@@ -196,7 +343,7 @@ export const trackProfileView = async (req, res, next) => {
       await RecentlyViewedProfile.findOneAndUpdate(
         { viewedBy: viewerId, profile: profileId },
         {},
-        { upsert: true, new: true }
+        { upsert: true, new: true },
       );
     }
 
@@ -218,7 +365,17 @@ export const getRecentlyViewedProfiles = async (req, res) => {
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
 
-    const total = await RecentlyViewedProfile.countDocuments({ viewedBy: userId });
+    const total = await RecentlyViewedProfile.countDocuments({
+      viewedBy: userId,
+    });
+
+    const savedProfiles = await SavedProfile.find({
+      savedBy: userId,
+    }).select("profile");
+
+    const savedProfileIds = new Set(
+      savedProfiles.map((item) => item.profile.toString()),
+    );
 
     const recentEntries = await RecentlyViewedProfile.find({ viewedBy: userId })
       .sort({ updatedAt: -1 })
@@ -226,15 +383,16 @@ export const getRecentlyViewedProfiles = async (req, res) => {
       .limit(limit)
       .populate({
         path: "profile",
-        select: "firstName lastName title avatar hourlyRate skills bio",
+        select:
+          "firstName lastName title photo rating jobSuccess totalJobs consultation available bio",
       });
 
-      console.log("ENTRIES:", recentEntries);
     const validProfiles = recentEntries
       .filter((entry) => entry.profile)
       .map((entry) => ({
         ...entry.profile.toObject(),
         viewedAt: entry.updatedAt,
+        isSaved: savedProfileIds.has(entry.profile._id.toString()),
       }));
 
     res.json({

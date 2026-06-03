@@ -11,15 +11,29 @@ export const getSavedProfiles = async (req, res) => {
     const userId = req.user.userId;
 
     const saved = await SavedProfile.find({ savedBy: userId })
-      .populate("profile", "name role profileImage jobSuccess totalJobs rating")
+      .populate(
+        "profile",
+        "firstName lastName bio photo title jobSuccess totalJobs rating",
+      )
       .sort({ createdAt: -1 });
 
-    const profiles = saved.map((entry) => entry.profile);
+    const profiles = saved
+      .filter((entry) => entry.profile)
+      .map((entry) => ({
+        ...entry.profile.toObject(),
+        isSaved: true,
+        savedAt: entry.createdAt,
+      }));
 
-    res.status(200).json({ success: true, savedProfiles: profiles });
+    res.status(200).json({
+      success: true,
+      savedProfiles: profiles,
+    });
   } catch (error) {
     console.error("GET SAVED PROFILES ERROR:", error);
-    res.status(500).json({ error: "Server error while fetching saved profiles" });
+    res.status(500).json({
+      error: "Server error while fetching saved profiles",
+    });
   }
 };
 
@@ -32,16 +46,20 @@ export const saveProfile = async (req, res) => {
     const { profileId } = req.params;
 
     if (userId.toString() === profileId) {
-      return res.status(400).json({ error: "You cannot save your own profile" });
+      return res
+        .status(400)
+        .json({ error: "You cannot save your own profile" });
     }
 
     await SavedProfile.findOneAndUpdate(
-  { savedBy: userId, profile: profileId },
-  { savedBy: userId, profile: profileId },
-  { upsert: true, returnDocument: 'after' }  // ✅ fix
-);
+      { savedBy: userId, profile: profileId },
+      { savedBy: userId, profile: profileId },
+      { upsert: true, returnDocument: "after" }, // ✅ fix
+    );
 
-    res.status(200).json({ success: true, message: "Profile saved", profileId });
+    res
+      .status(200)
+      .json({ success: true, message: "Profile saved", profileId });
   } catch (error) {
     console.error("SAVE PROFILE ERROR:", error);
     res.status(500).json({ error: "Server error while saving profile" });
@@ -65,10 +83,18 @@ export const unsaveProfile = async (req, res) => {
       return res.status(404).json({ error: "Saved profile not found" });
     }
 
-    res.status(200).json({ success: true, message: "Profile removed from saved list", profileId });
+    res
+      .status(200)
+      .json({
+        success: true,
+        message: "Profile removed from saved list",
+        profileId,
+      });
   } catch (error) {
     console.error("UNSAVE PROFILE ERROR:", error);
-    res.status(500).json({ error: "Server error while removing saved profile" });
+    res
+      .status(500)
+      .json({ error: "Server error while removing saved profile" });
   }
 };
 
@@ -94,33 +120,35 @@ export const getProfileById = async (req, res) => {
 export const getRecentlyHired = async (req, res) => {
   try {
     const userId = req.user.userId;
- 
+
     const contracts = await HiredContract.find({ client: userId })
-      .populate("freelancer", "name title location profileImage")
+      .populate("freelancer", "firstName lastName title address photo")
       .sort({ createdAt: -1 });
- 
+
     // Unique freelancers — latest job title dikhao
     const seen = new Set();
     const talents = [];
- 
+
     for (const contract of contracts) {
       const f = contract.freelancer;
       if (!f) continue;
- 
+
       const fId = f._id.toString();
       if (seen.has(fId)) continue;
       seen.add(fId);
- 
+
       talents.push({
-        _id:          f._id,
-        name:         f.name,
-        expertise:    f.title || "Freelancer",
-        location:     f.location || "",
-        profileImage: f.profileImage || "",
-        jobTitle:     contract.jobTitle,
+        _id: f._id,
+        name: `${f.firstName} ${f.lastName}`,
+        expertise: f.title || "Freelancer",
+        location: [f.address?.city, f.address?.state]
+          .filter(Boolean)
+          .join(", "),
+        photo: f.photo || "",
+        jobTitle: contract.jobTitle,
       });
     }
- 
+
     res.status(200).json({ success: true, talents });
   } catch (error) {
     console.error("GET RECENTLY HIRED ERROR:", error);

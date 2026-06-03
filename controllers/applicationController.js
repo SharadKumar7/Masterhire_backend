@@ -7,11 +7,12 @@ import Negotiation from "../models/negotiation.js";
 import Job from "../models/Jobs.js";
 import Message from "../models/message.js";
 import HiredContract from "../models/HiredContract.js";
+import { createNotification } from "./notificationController.js"; // ✅ ADD THIS
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-// ─── Multer config (freelancer file uploads) ──────────────────────────────────
+// ─── Multer config ────────────────────────────────────────────────────────────
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, path.join(__dirname, "../uploads/messages/")),
   filename:    (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
@@ -19,7 +20,7 @@ const storage = multer.diskStorage({
 
 export const upload = multer({
   storage,
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
+  limits: { fileSize: 20 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowed = /jpeg|jpg|png|gif|webp|mp4|mov|pdf|doc|docx|zip|txt/;
     const ext  = allowed.test(path.extname(file.originalname).toLowerCase());
@@ -28,7 +29,7 @@ export const upload = multer({
   },
 });
 
-// ─── Helper: get file info from multer ───────────────────────────────────────
+// ─── Helper ───────────────────────────────────────────────────────────────────
 const getFileInfo = (file) => {
   if (!file) return {};
   const mime = file.mimetype;
@@ -45,7 +46,7 @@ const getFileInfo = (file) => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── GET /api/job-details/:jobId ──────────────────────────────────────────────
+// GET /api/job-details/:jobId
 // ═══════════════════════════════════════════════════════════════════════════════
 export const getProjectDetails = async (req, res) => {
   try {
@@ -53,7 +54,6 @@ export const getProjectDetails = async (req, res) => {
     const { userId, role } = req.user;
 
     let job;
-
     if (role === "client") {
       job = await Job.findOne({ _id: jobId, clientId: userId })
         .select("_id title description budget deadline skills status assignedFreelancer")
@@ -63,10 +63,7 @@ export const getProjectDetails = async (req, res) => {
         .select("_id title description budget deadline skills status");
     }
 
-    if (!job) {
-      return res.status(404).json({ message: "Job not found or unauthorized" });
-    }
-
+    if (!job) return res.status(404).json({ message: "Job not found or unauthorized" });
     res.status(200).json({ job });
   } catch (error) {
     console.error("getProjectDetails error:", error);
@@ -76,8 +73,7 @@ export const getProjectDetails = async (req, res) => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── DELETE /api/jobs/:jobId ──────────────────────────────────────────────────
-// Only allowed when totalApplications === 0
+// DELETE /api/jobs/:jobId
 // ═══════════════════════════════════════════════════════════════════════════════
 export const deleteJob = async (req, res) => {
   try {
@@ -85,9 +81,7 @@ export const deleteJob = async (req, res) => {
     const clientId  = req.user.userId;
 
     const job = await Job.findOne({ _id: jobId, clientId });
-    if (!job) {
-      return res.status(404).json({ message: "Job not found or unauthorized" });
-    }
+    if (!job) return res.status(404).json({ message: "Job not found or unauthorized" });
 
     const appCount = await Application.countDocuments({
       job: new mongoose.Types.ObjectId(jobId),
@@ -109,7 +103,7 @@ export const deleteJob = async (req, res) => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── GET /api/client/job-applications/:jobId ──────────────────────────────────
+// GET /api/client/job-applications/:jobId
 // ═══════════════════════════════════════════════════════════════════════════════
 export const getClientJobApplications = async (req, res) => {
   try {
@@ -117,9 +111,7 @@ export const getClientJobApplications = async (req, res) => {
     const clientId   = req.user.userId;
 
     const job = await Job.findOne({ _id: jobId, clientId });
-    if (!job) {
-      return res.status(404).json({ message: "Job not found or unauthorized" });
-    }
+    if (!job) return res.status(404).json({ message: "Job not found or unauthorized" });
 
     const result = await Application.aggregate([
       { $match: { job: new mongoose.Types.ObjectId(jobId) } },
@@ -189,56 +181,64 @@ export const getClientJobApplications = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
+
+
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── PATCH /api/client/:applicationId/status ──────────────────────────────────
-// accepted → hire freelancer, assign job, reject others
+// PATCH /api/client/:applicationId/status
 // ═══════════════════════════════════════════════════════════════════════════════
 export const updateApplicationStatus = async (req, res) => {
   try {
     const { applicationId } = req.params;
     const { status, bidAmount } = req.body;
     const clientId = req.user.userId;
- 
+
     const validStatuses = ["accepted", "rejected", "negotiation"];
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ message: "Invalid status value" });
     }
- 
+
     const application = await Application.findById(applicationId).populate("job");
-    if (!application) {
-      return res.status(404).json({ message: "Application not found" });
-    }
- 
+    if (!application) return res.status(404).json({ message: "Application not found" });
+
     if (application.job.clientId.toString() !== clientId) {
       return res.status(403).json({ message: "Unauthorized" });
     }
- 
-    const jobId = application.job._id;
- 
+
+    const jobId       = application.job._id;
+    const freelancerId = application.user;
+    const jobTitle    = application.job.title;
+
+    // ── ACCEPTED → Hire freelancer ───────────────────────────────────────────
     if (status === "accepted") {
-      const freelancerId = application.user;
- 
       application.status = "accepted";
       await application.save();
- 
+
       await Job.findByIdAndUpdate(jobId, {
         status:             "assigned",
         assignedFreelancer: freelancerId,
         isPublic:           false,
       });
- 
+
       await Application.updateMany(
         { job: jobId, _id: { $ne: applicationId }, status: { $in: ["pending", "negotiation"] } },
         { $set: { status: "rejected" } }
       );
- 
-      // ✅ HiredContract create karo — recently hired list ke liye
+
       await HiredContract.findOneAndUpdate(
-        { client: clientId, freelancer: freelancerId, jobTitle: application.job.title },
-        { client: clientId, freelancer: freelancerId, jobTitle: application.job.title, status: "active" },
+        { client: clientId, freelancer: freelancerId, jobTitle },
+        { client: clientId, freelancer: freelancerId, jobTitle, status: "active" },
         { upsert: true, returnDocument: "after" }
       );
- 
+
+      // ✅ Freelancer ko — hired notification
+      await createNotification({
+        userId:      freelancerId,
+        type:        "JOB_ASSIGNED",
+        title:       "🎉 You've been hired!",
+        message:     `Congratulations! You have been selected for "${jobTitle}".`,
+        referenceId: jobId,
+      });
+
       return res.status(200).json({
         message: "Freelancer hired. Job assigned and other applications rejected.",
         application: {
@@ -248,13 +248,47 @@ export const updateApplicationStatus = async (req, res) => {
         },
       });
     }
- 
+
+    // ── REJECTED ─────────────────────────────────────────────────────────────
+    if (status === "rejected") {
+      application.status = "rejected";
+      await application.save();
+
+      // ✅ Freelancer ko — rejection notification
+      await createNotification({
+        userId:      freelancerId,
+        type:        "JOB_APPLIED",
+        title:       "Application Not Selected",
+        message:     `Your application for "${jobTitle}" was not selected this time.`,
+        referenceId: jobId,
+      });
+
+      return res.status(200).json({
+        message: "Application rejected successfully",
+        application: {
+          _id:       application._id,
+          status:    application.status,
+          bidAmount: application.bidAmount,
+        },
+      });
+    }
+
+    // ── NEGOTIATION ──────────────────────────────────────────────────────────
     application.status = status;
     if (status === "negotiation" && bidAmount) {
       application.bidAmount = bidAmount;
+
+      // ✅ Freelancer ko — counter offer notification
+      await createNotification({
+        userId:      freelancerId,
+        type:        "JOB_APPLIED",
+        title:       "Counter Offer Received",
+        message:     `Client sent a counter offer of ₹${bidAmount} for "${jobTitle}".`,
+        referenceId: jobId,
+      });
     }
     await application.save();
- 
+
     res.status(200).json({
       message: `Application ${status} successfully`,
       application: {
@@ -268,8 +302,10 @@ export const updateApplicationStatus = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
+
+
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── GET /api/client/negotiation/:applicationId ───────────────────────────────
+// GET /api/client/negotiation/:applicationId
 // ═══════════════════════════════════════════════════════════════════════════════
 export const getNegotiationHistory = async (req, res) => {
   try {
@@ -277,11 +313,8 @@ export const getNegotiationHistory = async (req, res) => {
     const clientId = req.user.userId;
 
     const application = await Application.findById(applicationId).populate("job");
-    if (!application) {
-      return res.status(404).json({ message: "Application not found" });
-    }
+    if (!application) return res.status(404).json({ message: "Application not found" });
 
-    // ✅ Fixed: job.clientId (not job.client)
     if (application.job.clientId.toString() !== clientId) {
       return res.status(403).json({ message: "Unauthorized" });
     }
@@ -299,7 +332,7 @@ export const getNegotiationHistory = async (req, res) => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── POST /api/client/negotiation ────────────────────────────────────────────
+// POST /api/client/negotiation
 // ═══════════════════════════════════════════════════════════════════════════════
 export const submitClientNegotiation = async (req, res) => {
   try {
@@ -311,11 +344,8 @@ export const submitClientNegotiation = async (req, res) => {
     }
 
     const application = await Application.findById(applicationId).populate("job");
-    if (!application) {
-      return res.status(404).json({ message: "Application not found" });
-    }
+    if (!application) return res.status(404).json({ message: "Application not found" });
 
-    // ✅ Fixed: job.clientId (not job.client)
     if (application.job.clientId.toString() !== clientId) {
       return res.status(403).json({ message: "Unauthorized" });
     }
@@ -333,6 +363,15 @@ export const submitClientNegotiation = async (req, res) => {
     application.status = "negotiation";
     await application.save();
 
+    // ✅ Freelancer ko — client ne counter offer bheja
+    await createNotification({
+      userId:      application.user,
+      type:        "JOB_APPLIED",
+      title:       "New Counter Offer",
+      message:     `Client proposed ₹${proposedAmount} for "${application.job.title}". Review and respond.`,
+      referenceId: application.job._id,
+    });
+
     res.status(201).json({ message: "Counter offer sent successfully" });
   } catch (error) {
     console.error("submitClientNegotiation error:", error);
@@ -342,7 +381,7 @@ export const submitClientNegotiation = async (req, res) => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── GET /api/client/messages/conversations?jobId= ───────────────────────────
+// GET /api/client/messages/conversations?jobId=
 // ═══════════════════════════════════════════════════════════════════════════════
 export const getConversations = async (req, res) => {
   try {
@@ -380,7 +419,6 @@ export const getConversations = async (req, res) => {
           },
           lastMessage:   { $first: "$text" },
           lastMessageAt: { $first: "$createdAt" },
-          // ✅ Fixed: isRead (not read)
           unread: {
             $sum: {
               $cond: [
@@ -433,7 +471,7 @@ export const getConversations = async (req, res) => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── GET /api/client/messages/:freelancerId?jobId= ───────────────────────────
+// GET /api/client/messages/:freelancerId?jobId=
 // ═══════════════════════════════════════════════════════════════════════════════
 export const getMessages = async (req, res) => {
   try {
@@ -461,7 +499,6 @@ export const getMessages = async (req, res) => {
       .sort({ createdAt: 1 })
       .select("text senderId receiverId senderRole createdAt isRead fileUrl fileName fileType fileSize");
 
-    // ✅ Fixed: isRead (not read)
     await Message.updateMany(
       { jobId, senderId: freelancerId, receiverId: clientId, isRead: false },
       { $set: { isRead: true } }
@@ -489,8 +526,7 @@ export const getMessages = async (req, res) => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── POST /api/client/messages ───────────────────────────────────────────────
-// Client send message (text only — no file upload on client side)
+// POST /api/client/messages
 // ═══════════════════════════════════════════════════════════════════════════════
 export const sendMessage = async (req, res) => {
   try {
@@ -509,7 +545,6 @@ export const sendMessage = async (req, res) => {
       return res.status(403).json({ message: "Freelancer did not apply to this job" });
     }
 
-    // Block if freelancer is rejected
     if (application.status === "rejected") {
       return res.status(403).json({ message: "Cannot message a rejected applicant" });
     }
@@ -521,6 +556,15 @@ export const sendMessage = async (req, res) => {
       senderRole: "client",
       text:       text.trim(),
       isRead:     false,
+    });
+
+    // ✅ Freelancer ko — client ne message bheja
+    await createNotification({
+      userId:      receiverId,
+      type:        "NEW_MESSAGE",
+      title:       "New Message",
+      message:     `Client sent you a message regarding "${job.title}".`,
+      referenceId: new mongoose.Types.ObjectId(jobId),
     });
 
     res.status(201).json({
@@ -542,7 +586,7 @@ export const sendMessage = async (req, res) => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── GET /api/freelancer/application/:jobId ───────────────────────────────────
+// GET /api/freelancer/application/:jobId
 // ═══════════════════════════════════════════════════════════════════════════════
 export const getFreelancerApplication = async (req, res) => {
   try {
@@ -554,9 +598,7 @@ export const getFreelancerApplication = async (req, res) => {
       user: new mongoose.Types.ObjectId(freelancerId),
     }).select("_id status bidAmount proposal updatedAt");
 
-    if (!application) {
-      return res.status(404).json({ message: "Application not found" });
-    }
+    if (!application) return res.status(404).json({ message: "Application not found" });
 
     res.status(200).json({ application });
   } catch (error) {
@@ -567,7 +609,7 @@ export const getFreelancerApplication = async (req, res) => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── PATCH /api/freelancer/application/:applicationId/negotiate ───────────────
+// PATCH /api/freelancer/application/:applicationId/negotiate
 // ═══════════════════════════════════════════════════════════════════════════════
 export const negotiateApplication = async (req, res) => {
   try {
@@ -582,11 +624,9 @@ export const negotiateApplication = async (req, res) => {
     const application = await Application.findOne({
       _id:  applicationId,
       user: new mongoose.Types.ObjectId(freelancerId),
-    });
+    }).populate("job", "title clientId");
 
-    if (!application) {
-      return res.status(404).json({ message: "Application not found" });
-    }
+    if (!application) return res.status(404).json({ message: "Application not found" });
 
     if (["accepted", "rejected"].includes(application.status)) {
       return res.status(403).json({
@@ -600,11 +640,20 @@ export const negotiateApplication = async (req, res) => {
 
     await Negotiation.create({
       application:    applicationId,
-      job:            application.job,
+      job:            application.job._id,
       client:         null,
       freelancer:     freelancerId,
       proposedAmount: Number(bidAmount),
       proposedBy:     "freelancer",
+    });
+
+    // ✅ Client ko — freelancer ne counter offer bheja
+    await createNotification({
+      userId:      application.job.clientId,
+      type:        "JOB_APPLIED",
+      title:       "Counter Offer from Freelancer",
+      message:     `A freelancer proposed ₹${bidAmount} for "${application.job.title}". Review the offer.`,
+      referenceId: application.job._id,
     });
 
     res.status(200).json({
@@ -624,21 +673,18 @@ export const negotiateApplication = async (req, res) => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── GET /api/freelancer/messages/:jobId ─────────────────────────────────────
+// GET /api/freelancer/messages/:jobId
 // ═══════════════════════════════════════════════════════════════════════════════
 export const getFreelancerMessages = async (req, res) => {
   try {
     const { jobId }    = req.params;
     const freelancerId = req.user.userId;
 
-    // Verify freelancer applied
     const application = await Application.findOne({
       job:  new mongoose.Types.ObjectId(jobId),
       user: new mongoose.Types.ObjectId(freelancerId),
     });
-    if (!application) {
-      return res.status(403).json({ message: "You have not applied to this job" });
-    }
+    if (!application) return res.status(403).json({ message: "You have not applied to this job" });
 
     const job = await Job.findById(jobId).select("clientId");
     if (!job) return res.status(404).json({ message: "Job not found" });
@@ -655,7 +701,6 @@ export const getFreelancerMessages = async (req, res) => {
       .sort({ createdAt: 1 })
       .select("text senderId receiverId senderRole createdAt isRead fileUrl fileName fileType fileSize");
 
-    // Mark client messages as read
     await Message.updateMany(
       { jobId, senderId: clientId, receiverId: freelancerId, isRead: false },
       { $set: { isRead: true } }
@@ -683,8 +728,7 @@ export const getFreelancerMessages = async (req, res) => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── POST /api/freelancer/messages ───────────────────────────────────────────
-// Freelancer send message (text + file)
+// POST /api/freelancer/messages
 // ═══════════════════════════════════════════════════════════════════════════════
 export const sendFreelancerMessage = async (req, res) => {
   try {
@@ -696,21 +740,17 @@ export const sendFreelancerMessage = async (req, res) => {
       return res.status(400).json({ message: "Message or file required" });
     }
 
-    // Verify applied
     const application = await Application.findOne({
       job:  new mongoose.Types.ObjectId(jobId),
       user: new mongoose.Types.ObjectId(freelancerId),
     });
-    if (!application) {
-      return res.status(403).json({ message: "You have not applied to this job" });
-    }
+    if (!application) return res.status(403).json({ message: "You have not applied to this job" });
 
-    // Block if rejected
     if (application.status === "rejected") {
       return res.status(403).json({ message: "Cannot send message — your application was rejected" });
     }
 
-    const job = await Job.findById(jobId).select("clientId");
+    const job = await Job.findById(jobId).select("clientId title");
     if (!job) return res.status(404).json({ message: "Job not found" });
 
     const message = await Message.create({
@@ -723,7 +763,15 @@ export const sendFreelancerMessage = async (req, res) => {
       ...getFileInfo(req.file),
     });
 
-    // Emit via socket
+    // ✅ Client ko — freelancer ne message bheja
+    await createNotification({
+      userId:      job.clientId,
+      type:        "NEW_MESSAGE",
+      title:       "New Message from Freelancer",
+      message:     `You have a new message regarding "${job.title}".`,
+      referenceId: new mongoose.Types.ObjectId(jobId),
+    });
+
     const io = req.app.get("io");
     if (io) {
       io.to(jobId.toString()).emit("receive_message", {
@@ -747,22 +795,18 @@ export const sendFreelancerMessage = async (req, res) => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── DELETE /api/freelancer/messages/:jobId ──────────────────────────────────
-// Called when freelancer unapplies — deletes all messages for this job
+// DELETE /api/freelancer/messages/:jobId
 // ═══════════════════════════════════════════════════════════════════════════════
 export const deleteFreelancerMessages = async (req, res) => {
   try {
     const { jobId }    = req.params;
     const freelancerId = req.user.userId;
 
-    // Verify this freelancer was part of this job's chat
     const application = await Application.findOne({
       job:  new mongoose.Types.ObjectId(jobId),
       user: new mongoose.Types.ObjectId(freelancerId),
     });
-    if (!application) {
-      return res.status(403).json({ message: "Unauthorized" });
-    }
+    if (!application) return res.status(403).json({ message: "Unauthorized" });
 
     await Message.deleteMany({ jobId });
 
