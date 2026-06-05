@@ -25,38 +25,51 @@ export const googleAuth = async (req, res) => {
 
     let user = await User.findOne({ email });
 
-    // NEW USER
+    // ── NEW USER ──────────────────────────────────────────────────────────
     if (!user) {
       if (!role) {
         return res.status(400).json({ message: "Role is required for first-time Google signup" });
       }
+
       user = await User.create({
         firstName: given_name,
-        lastName: family_name,
+        lastName:  family_name,
         email,
-        photo: picture,
+        photo:     picture,
         role,
-        googleId: sub,
+        googleId:  sub,
         isVerified: true,
         isProfileComplete: false,
+        // ✅ paymentMethod string nahi — object daal do naye user ke liye
+        client: role === "client"
+          ? { paymentMethod: { type: "", last4: "", expiry: "" } }
+          : undefined,
       });
     }
 
-    // LINK GOOGLE ACCOUNT
+    // ── UPDATE — $set use karo, .save() nahi ─────────────────────────────
+    // .save() existing string paymentMethod ko convert karne ki koshish karta hai → error
+    const updateFields = { lastSignIn: new Date() };
     if (!user.googleId) {
-      user.googleId = sub;
-      user.isVerified = true;
-      await user.save();
+      updateFields.googleId   = sub;
+      updateFields.isVerified = true;
     }
 
-    user.lastSignIn = new Date();
-    await user.save();
+    // ✅ Agar client hai aur paymentMethod string hai toh fix karo
+    if (user.role === "client" && typeof user.client?.paymentMethod === "string") {
+      updateFields["client.paymentMethod"] = { type: "", last4: "", expiry: "" };
+    }
+
+    await User.findByIdAndUpdate(user._id, { $set: updateFields });
+
+    // Fresh user fetch karo updated data ke liye
+    user = await User.findById(user._id);
 
     const token = jwt.sign(
       {
-        id: user._id,                    // FIX: userId → id (protect middleware ke saath match)
-        role: user.role,
-        tokenVersion: user.tokenVersion, // already tha, sahi hai
+        userId:       user._id,
+        role:         user.role,
+        tokenVersion: user.tokenVersion,
       },
       process.env.JWT_SECRET,
       { expiresIn: "7d" }
@@ -66,11 +79,11 @@ export const googleAuth = async (req, res) => {
       success: true,
       token,
       user: {
-        userId: user._id,
-        role: user.role,
-        fullName: `${user.firstName} ${user.lastName}`,
-        email: user.email,
-        photo: user.photo,
+        userId:            user._id,
+        role:              user.role,
+        fullName:          `${user.firstName} ${user.lastName}`,
+        email:             user.email,
+        photo:             user.photo,
         isProfileComplete: user.isProfileComplete,
       },
     });
@@ -79,6 +92,7 @@ export const googleAuth = async (req, res) => {
     return res.status(500).json({ message: "Google authentication failed" });
   }
 };
+
 
 // ================= SEND OTP =================
 export const sendOtp = async (req, res) => {
