@@ -1,11 +1,34 @@
 import User from "../models/User.js";
 import RecentlyViewedProfile from "../models/recentlyViewedProfile.js";
 import SavedProfile from "../models/savedProfiles.js";
+import Job from "../models/Jobs.js";
 
 import { getDbCategoriesFromSearch ,CATEGORY_KEYWORD_MAP } from "../models/KeywordMap.js";
 
 
 // import User from "../models/User.js"; // apna path use karo
+// import User from "../models/User.js";  // apna path use karo
+// import Job from "../models/Job.js";    // apna path use karo
+
+export const getPlatformStats = async (req, res) => {
+  try {
+    const [totalUsers, totalJobs] = await Promise.all([
+      User.countDocuments(),
+      Job.countDocuments({ status: "published" }),
+    ]);
+
+    res.json({
+      success: true,
+      stats: {
+        totalUsers,
+        totalJobs,
+      },
+    });
+  } catch (error) {
+    console.error("STATS ERROR:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
 
 export const getCategoryCounts = async (req, res) => {
   try {
@@ -76,7 +99,7 @@ const formatFreelancer = (user, savedProfileIds) => ({
   title: user.title || "Unknown Title",
   available: user.available || false,
   consultation: user.consultation || false,
-  isSaved: savedProfileIds.has(user._id.toString()),
+  isSaved: savedProfileIds.has(user._id.toString()) || false,
 });
 
 // ─── Main Controller ──────────────────────────────────────────────────────────
@@ -84,143 +107,85 @@ export const searchFreelancers = async (req, res) => {
   try {
     const userId = req.user?.userId;
     const {
-      category,
-      subcategory,
-      skill,
-      rating,
-      jobSuccess,
-      englishLevel,
-      language,
-      consultation,
-      available,
-      search, // ← search bar ka param
+      category, subcategory, skill, rating, jobSuccess,
+      englishLevel, language, consultation, available,
+      search,
+      page = 1,       // ← pagination
+      limit = 10,     // ← default 10
     } = req.query;
-
-    // ── Saved profiles ────────────────────────────────────────────────────────
-    let savedProfileIds = new Set();
-    if (userId) {
-      const savedProfiles = await SavedProfile.find({
-        savedBy: userId,
-      }).select("profile");
-      savedProfileIds = new Set(
-        savedProfiles.map((item) => item.profile.toString())
-      );
-    }
-
-    // ── Email exact match (search bar only) ───────────────────────────────────
+ 
+    const pageNum  = Math.max(1, parseInt(page));
+    const limitNum = Math.min(50, Math.max(1, parseInt(limit))); // max 50
+    const skip     = (pageNum - 1) * limitNum;
+ 
+    let query = { role: "freelancer" };
+ 
+    // 🔍 SEARCH BAR
     if (search && search.trim()) {
       const s = search.trim();
-
-      // Email jaisa lagta hai toh exact match karo
+ 
       if (s.includes("@")) {
         const emailMatch = await User.findOne({
           role: "freelancer",
           email: { $regex: `^${s}$`, $options: "i" },
         });
-
         if (emailMatch) {
           return res.json({
             success: true,
             count: 1,
-            freelancers: [formatFreelancer(emailMatch, savedProfileIds)],
+            totalCount: 1,
+            hasMore: false,
+            freelancers: [formatFreelancer(emailMatch)],
           });
         }
-
-        // Email tha but match nahi mila
-        return res.json({ success: true, count: 0, freelancers: [] });
+        return res.json({ success: true, count: 0, totalCount: 0, hasMore: false, freelancers: [] });
       }
-    }
-
-    // ── Build main query ──────────────────────────────────────────────────────
-    let query = { role: "freelancer" };
-
-    // 🔍 SEARCH BAR — title + skills + category keyword match
-    if (search && search.trim()) {
-      const s = search.trim();
-
-      // Keyword map se DB categories nikalo
+ 
       const { dbCategories, dbSubCategories } = getDbCategoriesFromSearch(s);
-
       const orConditions = [
-        // Title mein search
         { title: { $regex: s, $options: "i" } },
-
-        // Skills mein fuzzy search (node → nodejs, Node.js, NodeJS sab match)
         { skills: { $elemMatch: { $regex: s, $options: "i" } } },
       ];
-
-      // DB categories match
       if (dbCategories.length > 0) {
-        orConditions.push({
-          domains: {
-            $elemMatch: {
-              name: { $in: dbCategories },
-            },
-          },
-        });
+        orConditions.push({ domains: { $elemMatch: { name: { $in: dbCategories } } } });
       }
-
-      // DB subcategories match
       if (dbSubCategories.length > 0) {
-        orConditions.push({
-          domains: {
-            $elemMatch: {
-              subDomains: {
-                $elemMatch: { $in: dbSubCategories },
-              },
-            },
-          },
-        });
+        orConditions.push({ domains: { $elemMatch: { subDomains: { $elemMatch: { $in: dbSubCategories } } } } });
       }
-
       query.$or = orConditions;
     }
-
-    // 📂 CATEGORY filter (dropdown se)
+ 
+    // 📂 CATEGORY
     if (category && category !== "All") {
-      query.domains = {
-        $elemMatch: {
-          name: { $regex: category, $options: "i" },
-        },
-      };
+      query.domains = { $elemMatch: { name: { $regex: category, $options: "i" } } };
     }
-
-    // 📂 SUBCATEGORY filter — category ke saath merge karo
+ 
+    // 📂 SUBCATEGORY
     if (subcategory && subcategory !== "All") {
       if (query.domains?.$elemMatch) {
-        // Category already set hai, subcategory add karo same elemMatch mein
-        query.domains.$elemMatch.subDomains = {
-          $elemMatch: { $regex: subcategory, $options: "i" },
-        };
+        query.domains.$elemMatch.subDomains = { $elemMatch: { $regex: subcategory, $options: "i" } };
       } else {
-        query.domains = {
-          $elemMatch: {
-            subDomains: {
-              $elemMatch: { $regex: subcategory, $options: "i" },
-            },
-          },
-        };
+        query.domains = { $elemMatch: { subDomains: { $elemMatch: { $regex: subcategory, $options: "i" } } } };
       }
     }
-
-    // 🧠 SKILLS filter (dropdown se)
+ 
+    // 🧠 SKILLS
     if (skill && skill !== "All") {
-      // Fuzzy match — node → nodejs, Node.js sab match hoga
       query.skills = { $elemMatch: { $regex: skill, $options: "i" } };
     }
-
+ 
     // ⭐ RATING
     if (rating && rating !== "All") {
       query.rating = { $gte: Number(rating) };
     }
-
+ 
     // 📊 JOB SUCCESS
     if (jobSuccess && jobSuccess !== "All") {
       const num = parseInt(jobSuccess);
       if (!isNaN(num)) query.jobSuccess = { $gte: num };
     }
-
-    // 🌐 LANGUAGE FILTER
+ 
+    // 🌐 LANGUAGE
     let languageFilter = [];
     if (englishLevel && englishLevel !== "All") {
       languageFilter.push({ name: "English", level: englishLevel });
@@ -229,33 +194,41 @@ export const searchFreelancers = async (req, res) => {
       languageFilter.push({ name: language });
     }
     if (languageFilter.length > 0) {
-      query.languages = {
-        $elemMatch: { $or: languageFilter },
-      };
+      query.languages = { $elemMatch: { $or: languageFilter } };
     }
-
+ 
     // 🤝 CONSULTATION
-    if (consultation === "true") {
-      query.consultation = true;
-    }
-
+    if (consultation === "true") query.consultation = true;
+ 
     // 🟢 AVAILABLE
-    if (available === "true") {
-      query.available = true;
+    if (available === "true") query.available = true;
+ 
+    // ── Saved profiles (only if logged in) ───────────────────────────────────
+    let savedProfileIds = new Set();
+    if (userId) {
+      const savedProfiles = await SavedProfile.find({ savedBy: userId }).select("profile");
+      savedProfileIds = new Set(savedProfiles.map((item) => item.profile.toString()));
     }
-
-    // ── Fetch + sort ──────────────────────────────────────────────────────────
-    const freelancers = await User.find(query).sort({ rating: -1 });
-
+ 
+    // ── Fetch with pagination ─────────────────────────────────────────────────
+    const [freelancers, totalCount] = await Promise.all([
+      User.find(query).sort({ rating: -1 }).skip(skip).limit(limitNum),
+      User.countDocuments(query),
+    ]);
+ 
     const formattedFreelancers = freelancers.map((user) =>
       formatFreelancer(user, savedProfileIds)
     );
-
+ 
     res.json({
       success: true,
       count: formattedFreelancers.length,
+      totalCount,
+      hasMore: skip + limitNum < totalCount, // ← infinite scroll ke liye
+      page: pageNum,
       freelancers: formattedFreelancers,
     });
+ 
   } catch (error) {
     console.log("FREELANCER SEARCH ERROR:", error);
     res.status(500).json({ message: "Server error" });
@@ -336,7 +309,6 @@ export const trackProfileView = async (req, res, next) => {
     const viewerId = req.user?.userId;
     const profileId = req.params.id;
 
-    console.log("TRACK CALLED", viewerId, profileId);
 
     // ❌ avoid self tracking
     if (viewerId && viewerId !== profileId) {

@@ -9,6 +9,11 @@ import {
   unsaveProfile,
   getProfileById,
     getRecentlyHired,
+  getMyProfile,
+  updateMyProfile,
+  getClientProfile,
+  updateClientAbout,
+  getClientPublicProfile
 } from "../controllers/profileController.js";
 
 const router = express.Router();
@@ -24,6 +29,13 @@ router.post("/saved-profiles/:profileId", protect, saveProfile);
 router.delete("/saved-profiles/:profileId", protect, unsaveProfile);
 
 router.get("/recently-hired", protect, getRecentlyHired);
+
+router.get("/my-profile", protect, getMyProfile);
+router.put("/my-profile", protect, updateMyProfile);
+
+router.get("/client/profile", protect, getClientProfile);
+router.patch("/client/profile/about", protect, updateClientAbout);
+router.get("/client/profile/:clientId", protect, getClientPublicProfile);
 
 
 export default router;

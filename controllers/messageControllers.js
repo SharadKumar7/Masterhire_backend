@@ -1,6 +1,7 @@
 import Message from "../models/message.js";
 import Job from "../models/Jobs.js";
 import { getFileType, formatFileSize } from "../middleware/upload.js";
+import { createNotification } from "./notificationController.js"; // ✅ ADD THIS
 
 // ─── GET /api/client/messages/:freelancerId ───────────────────────────────────
 export const getMessages = async (req, res) => {
@@ -27,7 +28,9 @@ export const getMessages = async (req, res) => {
     const shaped = messages.map((m) => ({
       ...m,
       senderId:   m.senderId.toString() === myId ? "me" : m.senderId,
-      senderRole: m.senderId.toString() === myId ? req.user.role : (req.user.role === "client" ? "freelancer" : "client"),
+      senderRole: m.senderId.toString() === myId
+        ? req.user.role
+        : (req.user.role === "client" ? "freelancer" : "client"),
     }));
 
     res.json({ messages: shaped });
@@ -76,6 +79,21 @@ export const sendMessage = async (req, res) => {
       fileUrl, fileName, fileSize, fileType,
     });
 
+    // ✅ Receiver ko — new message notification
+    // Role ke hisaab se message label alag hoga
+    const senderLabel = role === "client" ? "Client" : "Freelancer";
+    const preview     = text?.trim()
+      ? (text.trim().length > 50 ? text.trim().slice(0, 50) + "…" : text.trim())
+      : `Sent a ${fileType || "file"}`;
+
+    await createNotification({
+      userId:      receiverId,
+      type:        "NEW_MESSAGE",
+      title:       `New Message from ${senderLabel}`,
+      message:     `${preview} — regarding "${job.title}"`,
+      referenceId: job._id,
+    });
+
     res.status(201).json({
       message: { ...message.toObject(), senderId: "me", senderRole: role },
     });
@@ -86,7 +104,6 @@ export const sendMessage = async (req, res) => {
 };
 
 // ─── POST /api/client/messages/call-log ──────────────────────────────────────
-// Save call log in chat (called from socket events)
 export const saveCallLog = async (req, res) => {
   try {
     const { receiverId, jobId, callType, callStatus, callDuration } = req.body;
@@ -118,7 +135,10 @@ export const saveCallLog = async (req, res) => {
 // ─── GET /api/messages/unread-count ──────────────────────────────────────────
 export const getUnreadCount = async (req, res) => {
   try {
-    const count = await Message.countDocuments({ receiverId: req.user.userId, isRead: false });
+    const count = await Message.countDocuments({
+      receiverId: req.user.userId,
+      isRead:     false,
+    });
     res.json({ count });
   } catch (err) {
     res.status(500).json({ message: err.message });

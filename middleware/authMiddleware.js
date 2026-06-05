@@ -1,19 +1,34 @@
 import jwt from "jsonwebtoken";
+import User from "../models/User.js";
 
-export const protect = (req, res, next) => {
+export const protect = async (req, res, next) => {
   try {
     const token = req.headers.authorization?.split(" ")[1];
-
     if (!token) {
-      return res.status(401).json({ message: "No token, access denied" });
+      return res.status(401).json({ message: "No token, access denied sharad" });
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    req.user = decoded; // 🔥 VERY IMPORTANT
+    const user = await User.findById(decoded.id).select("+tokenVersion");
+    if (!user) {
+      return res.status(401).json({ message: "User not found" });
+    }
 
-    next(); // go to next function
+    // tokenVersion check
+    const dbVersion    = user.tokenVersion ?? 0;
+    const tokenVersion = decoded.tokenVersion ?? 0;
+    if (tokenVersion !== dbVersion) {
+      return res.status(401).json({ message: "Session expired. Please login again." });
+    }
 
+     
+    req.user        = user;
+    req.user.userId = user._id; // ← req.user.userId wale controllers ke liye
+    req.user.id     = user._id;
+    req.user._id    = user._id; // ← backward compatibility for old controllers
+
+    next();
   } catch (error) {
     return res.status(401).json({ message: "Invalid token" });
   }

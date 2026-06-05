@@ -1,426 +1,359 @@
-// accountSettings.controller.js
-// Handles all freelancer account settings API logic
+import User from "../models/User.js";
+import bcrypt from "bcryptjs";
+import crypto from "crypto";
+import nodemailer from "nodemailer";
 
-import User from "../models/User.js"; // adjust path to your existing User model
+// ── Email transporter ──────────────────────────────────────────────────────
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+});
 
-// ─────────────────────────────────────────
-// GET /api/account/me
-// Returns current user profile (no password)
-// ─────────────────────────────────────────
+const sendOTPEmail = async (toEmail, otp) => {
+  await transporter.sendMail({
+    from: `"Support" <${process.env.EMAIL_USER}>`,
+    to: toEmail,
+    subject: "Account Deletion OTP",
+    html: `
+      <h2>Account Deletion Request</h2>
+      <p>Your OTP is: <h1 style="letter-spacing:8px;color:#e53e3e">${otp}</h1></p>
+      <p>Expires in <strong>10 minutes</strong>. Ignore if not requested.</p>
+    `,
+  });
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /me
+// FIX: req.user.userId → req.user._id (protect middleware ab full user deta hai)
+// ─────────────────────────────────────────────────────────────────────────────
 export const getProfile = async (req, res) => {
   try {
-    const user = await User.findById(req.user.userId).select("-password");
-    if (!user) {
-      return res
-        .status(404)
-        .json({ success: false, message: "User not found" });
-    }
-    const formattedUser = {
-      id: user._id,
-      fullName: `${user.firstName} ${user.lastName}`,
-      email: user.email,
-      mobile: user.mobile,
-      category: user.domains?.[0]?.name,
-      subCategories: user.domains?.[0]?.subDomains,
-      experienceLevel: user.freelancer.experienceLevel,
-      visibility: user.freelancer.visibility,
-      isEarningsPrivate: user.freelancer.isEarningsPrivate,
-      upi_id: user.freelancer.upi_id,
-      notifications: user.freelancer.notifications,
-      lastSignIn: user.lastSignIn,
-      currentBalance: user.freelancer.currentBalance,
-    };
-    return res
-      .status(200)
-      .json({ success: true, message: "Profile fetched", data: formattedUser });
+    const user = await User.findById(req.user._id).select("-password -deleteOtp -deleteOtpExpiry -tokenVersion");
+    if (!user) return res.status(404).json({ success: false, message: "User not found" });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        fullName:          `${user.firstName || ""} ${user.lastName || ""}`.trim(),
+        email:             user.email,
+        mobile:            user.mobile || "",
+        category:          user.domains?.[0]?.name || "",
+        subCategories:     user.domains?.[0]?.subDomains || [],
+        experienceLevel:   user.freelancer?.experienceLevel || "Entry level",
+        visibility:        user.freelancer?.visibility || "Public",
+        isEarningsPrivate: user.freelancer?.isEarningsPrivate ?? true,
+        upi_id:            user.freelancer?.upi_id || "",
+        currentBalance:    user.freelancer?.currentBalance ?? 0,
+        notifications:     user.freelancer?.notifications || {},
+        lastSignIn:        user.lastSignIn || user.createdAt,
+        // FIX: withdrawalHistory from DB, not hardcoded
+        withdrawalHistory: user.freelancer?.withdrawalHistory || [],
+      },
+    });
   } catch (err) {
-    return res
-      .status(500)
-      .json({ success: false, message: "Server error: " + err.message });
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// ─────────────────────────────────────────
-// PATCH /api/account/contact
-// Updates: name (firstName+lastName), email, phone
-// ─────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// PATCH /contact
+// FIX: req.user.userId → req.user._id
+// ─────────────────────────────────────────────────────────────────────────────
 export const updateContact = async (req, res) => {
   try {
     const { name, email, phone } = req.body;
-
     const updateFields = {};
 
-    // =========================
-    // Name
-    // =========================
     if (name !== undefined) {
-      if (typeof name !== "string" || name.trim() === "") {
-        return res.status(400).json({
-          success: false,
-          message: "Name must be a non-empty string",
-        });
-      }
-
+      if (!name.trim()) return res.status(400).json({ success: false, message: "Name cannot be empty" });
       const parts = name.trim().split(" ");
-
       updateFields.firstName = parts[0];
-      updateFields.lastName = parts.slice(1).join(" ") || "";
+      updateFields.lastName  = parts.slice(1).join(" ") || "";
     }
 
-    // =========================
-    // Email
-    // =========================
     if (email !== undefined) {
       const cleanEmail = email.toLowerCase().trim();
+      if (!cleanEmail.includes("@")) return res.status(400).json({ success: false, message: "Valid email is required" });
 
-      if (typeof email !== "string" || !cleanEmail.includes("@")) {
-        return res.status(400).json({
-          success: false,
-          message: "Valid email is required",
-        });
+      if (cleanEmail !== req.user.email) {
+        const existing = await User.findOne({ email: cleanEmail });
+        if (existing) return res.status(400).json({ success: false, message: "Email already in use" });
       }
-
-      // Current user
-      const currentUser = await User.findById(req.user.userId);
-
-      if (!currentUser) {
-        return res.status(404).json({
-          success: false,
-          message: "User not found",
-        });
-      }
-
-      // Only check duplicate if email changed
-      if (currentUser.email !== cleanEmail) {
-        const existing = await User.findOne({
-          email: cleanEmail,
-        });
-
-        if (existing) {
-          return res.status(400).json({
-            success: false,
-            message: "Email is already in use by another account",
-          });
-        }
-      }
-
       updateFields.email = cleanEmail;
     }
 
-    // =========================
-    // Phone
-    // =========================
-    if (phone !== undefined) {
-      if (typeof phone !== "string") {
-        return res.status(400).json({
-          success: false,
-          message: "Phone must be a string",
-        });
-      }
+    if (phone !== undefined) updateFields.mobile = phone.trim();
 
-      updateFields.phone = phone.trim();
-    }
+    if (Object.keys(updateFields).length === 0)
+      return res.status(400).json({ success: false, message: "No valid fields provided" });
 
-    // =========================
-    // No fields
-    // =========================
-    if (Object.keys(updateFields).length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "No valid fields provided",
-      });
-    }
-
-    // =========================
-    // Update User
-    // =========================
     const updated = await User.findByIdAndUpdate(
-      req.user.userId,
+      req.user._id, // FIX: was req.user.userId
       { $set: updateFields },
-      {
-        new: true,
-        runValidators: true,
-      }
+      { new: true, runValidators: true }
     ).select("-password");
 
     return res.status(200).json({
       success: true,
-      message: "Contact info updated successfully",
-      data: updated,
+      message: "Contact info updated",
+      data: {
+        firstName: updated.firstName,
+        lastName:  updated.lastName,
+        email:     updated.email,
+        phone:     updated.mobile,
+      },
     });
   } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: "Server error: " + err.message,
-    });
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// ─────────────────────────────────────────
-// PATCH /api/account/profile
-// Updates: category, subCategories, experienceLevel, visibility, isEarningsPrivate
-// ─────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// PATCH /profile
+// ─────────────────────────────────────────────────────────────────────────────
 export const updateProfileSettings = async (req, res) => {
   try {
-    const {
-      category,
-      subCategories,
-      experienceLevel,
-      visibility,
-      isEarningsPrivate,
-    } = req.body;
-    const updateFields = {};
+    const { category, subCategories, experienceLevel, visibility, isEarningsPrivate } = req.body;
 
     const VALID_EXPERIENCE = ["Entry level", "Intermediate", "Expert"];
     const VALID_VISIBILITY = ["Public", "Private"];
-
-    if (category !== undefined) {
-      if (typeof category !== "string" || category.trim() === "") {
-        return res
-          .status(400)
-          .json({
-            success: false,
-            message: "category must be a non-empty string",
-          });
-      }
-      updateFields.category = category.trim();
-    }
-
-    if (subCategories !== undefined) {
-      if (
-        !Array.isArray(subCategories) ||
-        subCategories.some((s) => typeof s !== "string")
-      ) {
-        return res
-          .status(400)
-          .json({
-            success: false,
-            message: "subCategories must be an array of strings",
-          });
-      }
-      updateFields.subCategories = subCategories.map((s) => s.trim());
-    }
+    const update = {};
 
     if (experienceLevel !== undefined) {
-      if (!VALID_EXPERIENCE.includes(experienceLevel)) {
-        return res.status(400).json({
-          success: false,
-          message: `experienceLevel must be one of: ${VALID_EXPERIENCE.join(", ")}`,
-        });
-      }
-      updateFields.experienceLevel = experienceLevel;
+      if (!VALID_EXPERIENCE.includes(experienceLevel))
+        return res.status(400).json({ success: false, message: `experienceLevel must be one of: ${VALID_EXPERIENCE.join(", ")}` });
+      update["freelancer.experienceLevel"] = experienceLevel;
     }
 
     if (visibility !== undefined) {
-      if (!VALID_VISIBILITY.includes(visibility)) {
-        return res
-          .status(400)
-          .json({
-            success: false,
-            message: "visibility must be 'Public' or 'Private'",
-          });
-      }
-      updateFields.visibility = visibility;
+      if (!VALID_VISIBILITY.includes(visibility))
+        return res.status(400).json({ success: false, message: "visibility must be 'Public' or 'Private'" });
+      update["freelancer.visibility"] = visibility;
     }
 
     if (isEarningsPrivate !== undefined) {
-      if (typeof isEarningsPrivate !== "boolean") {
-        return res
-          .status(400)
-          .json({
-            success: false,
-            message: "isEarningsPrivate must be a boolean",
-          });
-      }
-      updateFields.isEarningsPrivate = isEarningsPrivate;
+      if (typeof isEarningsPrivate !== "boolean")
+        return res.status(400).json({ success: false, message: "isEarningsPrivate must be a boolean" });
+      update["freelancer.isEarningsPrivate"] = isEarningsPrivate;
     }
 
-    if (Object.keys(updateFields).length === 0) {
-      return res
-        .status(400)
-        .json({ success: false, message: "No valid fields provided" });
+    // Category & subCategories stored in domains array
+    if (category !== undefined || subCategories !== undefined) {
+      const user = await User.findById(req.user._id);
+      const existing = user.domains?.[0] || {};
+      const newDomain = {
+        name:       category       !== undefined ? category.trim()        : existing.name,
+        subDomains: subCategories  !== undefined ? subCategories.map(s => s.trim()) : existing.subDomains,
+      };
+      update["domains"] = [newDomain];
     }
 
-    const updated = await User.findByIdAndUpdate(
-      req.user._id,
-      { $set: updateFields },
-      { new: true, runValidators: true },
-    ).select("-password");
+    if (Object.keys(update).length === 0)
+      return res.status(400).json({ success: false, message: "No valid fields provided" });
 
-    return res
-      .status(200)
-      .json({
-        success: true,
-        message: "Profile settings updated",
-        data: updated,
-      });
+    const updated = await User.findByIdAndUpdate(req.user._id, { $set: update }, { new: true }).select("-password");
+
+    return res.status(200).json({ success: true, message: "Profile settings updated", data: updated });
   } catch (err) {
-    return res
-      .status(500)
-      .json({ success: false, message: "Server error: " + err.message });
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// ─────────────────────────────────────────
-// PATCH /api/account/upi
-// Updates: upi_id
-// ─────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// PATCH /upi
+// ─────────────────────────────────────────────────────────────────────────────
 export const updateUPI = async (req, res) => {
   try {
     const { upi_id } = req.body;
+    if (!upi_id || !upi_id.includes("@"))
+      return res.status(400).json({ success: false, message: "Invalid UPI ID format" });
 
-    if (!upi_id || typeof upi_id !== "string" || upi_id.trim() === "") {
-      return res
-        .status(400)
-        .json({ success: false, message: "upi_id must be a non-empty string" });
-    }
-
-    const updated = await User.findByIdAndUpdate(
-      req.user._id,
-      { $set: { upi_id: upi_id.trim() } },
-      { new: true },
-    ).select("-password");
-
-    return res
-      .status(200)
-      .json({ success: true, message: "UPI ID updated", data: updated });
+    await User.findByIdAndUpdate(req.user._id, { $set: { "freelancer.upi_id": upi_id.trim() } });
+    return res.status(200).json({ success: true, data: { upi_id } });
   } catch (err) {
-    return res
-      .status(500)
-      .json({ success: false, message: "Server error: " + err.message });
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// ─────────────────────────────────────────
-// PATCH /api/account/notifications
-// Updates: notifications object (all toggle fields)
-// ─────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// PATCH /notifications
+// ─────────────────────────────────────────────────────────────────────────────
 export const updateNotifications = async (req, res) => {
   try {
     const VALID_KEYS = [
-      "jobRecommendations",
-      "applicationUpdates",
-      "interviewReminders",
-      "paymentReceived",
-      "withdrawalStatus",
-      "invoiceGenerated",
-      "messageReceived",
-      "unreadReminders",
-      "newDeviceLogin",
-      "passwordChange",
+      "jobRecommendations", "applicationUpdates", "interviewReminders",
+      "paymentReceived", "withdrawalStatus", "invoiceGenerated",
+      "messageReceived", "unreadReminders", "newDeviceLogin", "passwordChange",
     ];
 
     const { notifications } = req.body;
+    if (!notifications || typeof notifications !== "object")
+      return res.status(400).json({ success: false, message: "notifications must be an object" });
 
-    if (
-      !notifications ||
-      typeof notifications !== "object" ||
-      Array.isArray(notifications)
-    ) {
-      return res
-        .status(400)
-        .json({ success: false, message: "notifications must be an object" });
-    }
-
-    const updateFields = {};
+    const update = {};
     for (const key of Object.keys(notifications)) {
-      if (!VALID_KEYS.includes(key)) {
-        return res
-          .status(400)
-          .json({
-            success: false,
-            message: `Invalid notification key: ${key}`,
-          });
-      }
-      if (typeof notifications[key] !== "boolean") {
-        return res
-          .status(400)
-          .json({ success: false, message: `${key} must be a boolean` });
-      }
-      updateFields[`notifications.${key}`] = notifications[key];
+      if (!VALID_KEYS.includes(key))
+        return res.status(400).json({ success: false, message: `Invalid key: ${key}` });
+      if (typeof notifications[key] !== "boolean")
+        return res.status(400).json({ success: false, message: `${key} must be a boolean` });
+      update[`freelancer.notifications.${key}`] = notifications[key];
     }
+
+    await User.findByIdAndUpdate(req.user._id, { $set: update });
+    return res.status(200).json({ success: true, message: "Notifications updated" });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PATCH /change-password
+// ─────────────────────────────────────────────────────────────────────────────
+export const changePassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword)
+      return res.status(400).json({ success: false, message: "Both passwords are required" });
+    if (newPassword.length < 8)
+      return res.status(400).json({ success: false, message: "Password must be at least 8 characters" });
+
+    const user = await User.findById(req.user._id).select("+password");
+    const isMatch = await bcrypt.compare(currentPassword, user.password);
+    if (!isMatch)
+      return res.status(400).json({ success: false, message: "Current password is incorrect" });
+
+    user.password = await bcrypt.hash(newPassword, 12);
+    await user.save();
+    return res.status(200).json({ success: true, message: "Password changed successfully" });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /logout-all
+// FIX: tokenVersion bump so all existing JWTs are rejected
+// ─────────────────────────────────────────────────────────────────────────────
+export const logoutAllDevices = async (req, res) => {
+  try {
+    await User.findByIdAndUpdate(req.user._id, { $inc: { tokenVersion: 1 } });
+    return res.status(200).json({ success: true, message: "Logged out from all devices" });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /withdraw
+// FIX: actual withdrawal logic with balance deduction & history record
+// TODO: Replace with Razorpay Payouts API when payment gateway is added
+// ─────────────────────────────────────────────────────────────────────────────
+export const withdrawMoney = async (req, res) => {
+  try {
+    const { amount } = req.body;
+    if (!amount || Number(amount) <= 0)
+      return res.status(400).json({ success: false, message: "Invalid amount" });
+    if (Number(amount) < 100)
+      return res.status(400).json({ success: false, message: "Minimum withdrawal is ₹100" });
+
+    const user = await User.findById(req.user._id);
+    if (!user.freelancer?.upi_id)
+      return res.status(400).json({ success: false, message: "Please set your UPI ID first" });
+    if ((user.freelancer?.currentBalance ?? 0) < Number(amount))
+      return res.status(400).json({ success: false, message: "Insufficient balance" });
+
+    /*
+      TODO: Razorpay Payouts Integration
+      1. import Razorpay from "razorpay"
+      2. const razorpay = new Razorpay({ key_id: ..., key_secret: ... })
+      3. Create payout:
+         const payout = await razorpay.payouts.create({
+           account_number: process.env.RAZORPAY_ACCOUNT_NUMBER,
+           fund_account_id: user.freelancer.razorpayFundAccountId, // saved when UPI is added
+           amount: amount * 100,
+           currency: "INR",
+           mode: "UPI",
+           purpose: "payout",
+         });
+      4. Only deduct balance after payout is confirmed
+    */
 
     const updated = await User.findByIdAndUpdate(
       req.user._id,
-      { $set: updateFields },
-      { new: true },
-    ).select("-password");
+      {
+        $inc:  { "freelancer.currentBalance": -Number(amount) },
+        $push: {
+          "freelancer.withdrawalHistory": {
+            amount: Number(amount),
+            date:   new Date(),
+            status: "Pending", // changes to "Success" after payout confirmed
+            upi_id: user.freelancer.upi_id,
+          },
+        },
+      },
+      { new: true }
+    );
 
-    return res
-      .status(200)
-      .json({
-        success: true,
-        message: "Notification settings updated",
-        data: updated,
-      });
+    return res.status(200).json({
+      success: true,
+      data: {
+        balance:          updated.freelancer.currentBalance,
+        withdrawalHistory: updated.freelancer.withdrawalHistory,
+      },
+    });
   } catch (err) {
-    return res
-      .status(500)
-      .json({ success: false, message: "Server error: " + err.message });
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// ─────────────────────────────────────────
-// DELETE /api/account/delete
-// Verifies OTP then deletes the account
-// ─────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /send-otp
+// FIX: actually saves OTP to DB + sends email (was just console.log before)
+// ─────────────────────────────────────────────────────────────────────────────
+export const sendDeleteOTP = async (req, res) => {
+  try {
+    const otp    = crypto.randomInt(100000, 999999).toString();
+    const expiry = new Date(Date.now() + 10 * 60 * 1000);
+
+    await User.findByIdAndUpdate(req.user._id, {
+      $set: { deleteOtp: otp, deleteOtpExpiry: expiry },
+    });
+    await sendOTPEmail(req.user.email, otp);
+
+    return res.status(200).json({ success: true, message: "OTP sent to your email" });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: "Failed to send OTP: " + err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /delete
+// FIX: proper OTP verification from DB + tokenVersion bump
+// ─────────────────────────────────────────────────────────────────────────────
 export const deleteAccount = async (req, res) => {
   try {
     const { otp } = req.body;
+    if (!otp) return res.status(400).json({ success: false, message: "OTP is required" });
 
-    if (!otp || typeof otp !== "string" || otp.trim() === "") {
-      return res
-        .status(400)
-        .json({ success: false, message: "OTP is required" });
-    }
+    const user = await User.findById(req.user._id).select("+deleteOtp +deleteOtpExpiry");
+    if (!user.deleteOtp || user.deleteOtp !== otp)
+      return res.status(400).json({ success: false, message: "Invalid OTP" });
+    if (new Date() > user.deleteOtpExpiry)
+      return res.status(400).json({ success: false, message: "OTP has expired" });
 
-    // ── Replace this block with your real OTP verification logic ──
-    // Example: check OTP from Redis/DB where you stored it on send-OTP step
-    const isValidOTP = otp.trim() === req.user.pendingOtp; // placeholder
-    if (!isValidOTP) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid or expired OTP" });
-    }
-    // ──────────────────────────────────────────────────────────────
+    // Soft delete + invalidate all sessions
+    await User.findByIdAndUpdate(req.user._id, {
+      $set: {
+        isVerified:      false,
+        deleteOtp:       null,
+        deleteOtpExpiry: null,
+        email:           `deleted_${req.user._id}@removed.com`,
+      },
+      $inc: { tokenVersion: 1 }, // FIX: invalidates all active tokens immediately
+    });
 
-    await User.findByIdAndDelete(req.user._id);
-
-    return res
-      .status(200)
-      .json({ success: true, message: "Account deleted successfully" });
+    return res.status(200).json({ success: true, message: "Account deleted successfully" });
   } catch (err) {
-    return res
-      .status(500)
-      .json({ success: false, message: "Server error: " + err.message });
-  }
-};
-
-// ─────────────────────────────────────────
-// POST /api/account/send-otp
-// Sends OTP to user email for account deletion
-// ─────────────────────────────────────────
-export const sendDeleteOTP = async (req, res) => {
-  try {
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-
-    // ── Store OTP with expiry in your DB/Redis here ──
-    // Example: await redis.setex(`otp:${req.user._id}`, 300, otp);
-    // Or: await User.findByIdAndUpdate(req.user._id, { pendingOtp: otp, otpExpiry: Date.now() + 300000 });
-    // ─────────────────────────────────────────────────
-
-    // ── Send email using your mail service ──
-    // Example: await sendEmail({ to: req.user.email, subject: "Delete OTP", text: `Your OTP: ${otp}` });
-    // ─────────────────────────────────────────
-
-    console.log(`[DEV] OTP for ${req.user.email}: ${otp}`); // remove in production
-
-    return res
-      .status(200)
-      .json({ success: true, message: "OTP sent to your registered email" });
-  } catch (err) {
-    return res
-      .status(500)
-      .json({ success: false, message: "Server error: " + err.message });
+    return res.status(500).json({ success: false, message: err.message });
   }
 };

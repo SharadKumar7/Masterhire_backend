@@ -14,14 +14,14 @@ const userSchema = new mongoose.Schema(
     },
 
     googleId: {
-  type: String,
-  default: null,
-},
+      type: String,
+      default: null,
+    },
 
     password: {
-  type: String,
-  default: null,
-},
+      type: String,
+      default: null,
+    },
 
     role: {
       type: String,
@@ -38,11 +38,9 @@ const userSchema = new mongoose.Schema(
       default: false,
     },
 
-    // ✅ ADDED: for account deletion OTP (separate from signup OTP)
     deleteOtp: { type: String, default: null },
     deleteOtpExpiry: { type: Date, default: null },
 
-    // ✅ ADDED: increment this to invalidate all existing JWT tokens (logout-all-devices)
     tokenVersion: { type: Number, default: 0 },
 
     // 👤 PERSONAL
@@ -58,13 +56,13 @@ const userSchema = new mongoose.Schema(
       zip: String,
     },
 
-    // 🌐 LAST SEEN (COMMON)
+    // 🌐 LAST SEEN
     lastSeen: {
       type: Date,
       default: Date.now,
     },
 
-    // 🔥 DOMAIN (MAIN + SUBDOMAIN)
+    // 🔥 DOMAIN
     domains: [
       {
         name: String,
@@ -82,8 +80,9 @@ const userSchema = new mongoose.Schema(
       {
         title: String,
         company: String,
-        startDate: Date,
-        endDate: Date,
+        startDate: String,
+        endDate: String,
+        current: { type: Boolean, default: false },
         description: String,
       },
     ],
@@ -102,6 +101,33 @@ const userSchema = new mongoose.Schema(
       {
         language: String,
         proficiency: String,
+      },
+    ],
+
+    // ✅ NEW: Certifications
+    certifications: [
+      {
+        name: String,
+        issuer: String,
+        issueDate: String,
+        expiryDate: String,
+        noExpiry: { type: Boolean, default: false },
+        credentialUrl: { type: String, default: "" },
+      },
+    ],
+
+    // ✅ NEW: Other Experiences
+    otherExperiences: [
+      {
+        title: String,
+        type: {
+          type: String,
+          enum: ["Volunteer", "Freelance Project", "Open Source", "Hackathon", "Award", "Publication", "Other"],
+          default: "Other",
+        },
+        organization: String,
+        year: String,
+        description: String,
       },
     ],
 
@@ -139,7 +165,11 @@ const userSchema = new mongoose.Schema(
       upi_id: { type: String, trim: true },
 
       isAvailable: { type: Boolean, default: true },
-      visibility: { type: String, enum: ["Public", "Private"], default: "Public" },
+      visibility: {
+        type: String,
+        enum: ["Public", "Private"],
+        default: "Public",
+      },
       consultation: { type: Boolean, default: false },
       responseTime: String,
 
@@ -169,17 +199,29 @@ const userSchema = new mongoose.Schema(
     // 🏢 CLIENT SECTION
     // =====================================================
     client: {
-      companyName: String,
-      companyDetails: String,
+      companyName:    { type: String, default: "" },
+      companyDetails: { type: String, default: "" },
+
+      // ✅ NEW: Profile fields
+      about:       { type: String, default: "" },
+      industry:    { type: String, default: "" },
+      companySize: { type: String, default: "" },
+      website:     { type: String, default: "" },
+
+      // ✅ NEW: Verification
+      isEmailVerified:   { type: Boolean, default: false },
+      isPaymentVerified: { type: Boolean, default: false },
 
       postedJobs: [{ type: mongoose.Schema.Types.ObjectId, ref: "Job" }],
 
-      totalHires: { type: Number, default: 0 },
-      activeJobs: { type: Number, default: 0 },
-      totalSpent: { type: Number, default: 0 },
-      rating: { type: Number, default: 0 },
+      totalHires:        { type: Number, default: 0 },
+      activeJobs:        { type: Number, default: 0 },
+      totalSpent:        { type: Number, default: 0 },
+      projectsCompleted: { type: Number, default: 0 },
+      repeatHires:       { type: Number, default: 0 },
+      rating:            { type: Number, default: 0 },
+      totalReviews:      { type: Number, default: 0 },
 
-      // ✅ ADDED: Hiring Preferences
       freelancerLevel: {
         type: String,
         enum: ["Beginner", "Intermediate", "Expert", ""],
@@ -198,17 +240,26 @@ const userSchema = new mongoose.Schema(
         default: "Public",
       },
 
-      // ✅ ADDED: Billing & Payments
-      walletBalance: { type: Number, default: 0 },
-      paymentMethod: { type: String, default: "" },
-      upi_id: { type: String, default: "" },
+      walletBalance:  { type: Number, default: 0 },
+      upi_id:         { type: String, default: "" },
       billingAddress: { type: String, default: "" },
+
+      // ✅ UPDATED: paymentMethod as object
+      paymentMethod: {
+        type:   { type: String, default: "" },
+        last4:  { type: String, default: "" },
+        expiry: { type: String, default: "" },
+      },
 
       paymentHistory: [
         {
           amount: { type: Number, required: true },
           date: { type: Date, default: Date.now },
-          status: { type: String, enum: ["Success", "Pending", "Failed"], default: "Pending" },
+          status: {
+            type: String,
+            enum: ["Success", "Pending", "Failed"],
+            default: "Pending",
+          },
           description: { type: String, default: "" },
         },
       ],
@@ -216,14 +267,13 @@ const userSchema = new mongoose.Schema(
       invoices: [
         {
           invoiceNumber: { type: String, required: true },
-          amount: { type: Number, required: true },
-          date: { type: Date, default: Date.now },
-          status: { type: String, enum: ["Paid", "Unpaid"], default: "Unpaid" },
-          fileUrl: { type: String, default: "" },
+          amount:        { type: Number, required: true },
+          date:          { type: Date, default: Date.now },
+          status:        { type: String, enum: ["Paid", "Unpaid"], default: "Unpaid" },
+          fileUrl:       { type: String, default: "" },
         },
       ],
 
-      // ✅ ADDED: Client Notifications
       notifications: {
         proposalReceived:   { type: Boolean, default: true },
         hiringUpdates:      { type: Boolean, default: true },
@@ -234,7 +284,7 @@ const userSchema = new mongoose.Schema(
       },
     },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 export default mongoose.model("User", userSchema);

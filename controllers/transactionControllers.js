@@ -1,27 +1,23 @@
-// controllers/transactionController.js
 import mongoose from "mongoose";
 import Wallet      from "../models/wallet.js";
 import Transaction from "../models/Transaction.js";
 import Withdrawal  from "../models/withdrawal.js";
+import { createNotification } from "./notificationController.js"; // ✅ ADD THIS
 
 // ─── Helper: get or create wallet ─────────────────────────────────────────────
 const getOrCreateWallet = async (userId, role) => {
   let wallet = await Wallet.findOne({ user: userId });
-  if (!wallet) {
-    wallet = await Wallet.create({ user: userId, role });
-  }
+  if (!wallet) wallet = await Wallet.create({ user: userId, role });
   return wallet;
 };
 
 // ─── Helper: format date strings ──────────────────────────────────────────────
 const formatDate = (d) =>
   new Date(d).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
-
 const formatTime = (d) =>
   new Date(d).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
 
 // ─── Helper: parse date range string ──────────────────────────────────────────
-// "May 01 - May 31, 2024" → { startDate, endDate }
 const parseDateRange = (rangeStr) => {
   try {
     if (!rangeStr) return { startDate: null, endDate: null };
@@ -36,13 +32,11 @@ const parseDateRange = (rangeStr) => {
   }
 };
 
-// ─── Helper: build chart data from transactions ────────────────────────────────
-const buildChartData = (transactions, startDate, endDate) => {
+// ─── Helper: build chart data ──────────────────────────────────────────────────
+const buildChartData = (transactions) => {
   const map = {};
   transactions.forEach((tx) => {
-    const label = new Date(tx.dateValue).toLocaleDateString("en-IN", {
-      month: "short", day: "2-digit",
-    });
+    const label = new Date(tx.dateValue).toLocaleDateString("en-IN", { month: "short", day: "2-digit" });
     map[label] = (map[label] || 0) + tx.amount;
   });
   return Object.entries(map).map(([label, value]) => ({ label, value }));
@@ -70,32 +64,26 @@ const buildBreakdown = (transactions) => {
   return Object.entries(map).map(([label, value]) => ({
     label,
     value,
-    pct: total > 0 ? Math.round((value / total) * 1000) / 10 : 0,
+    pct:   total > 0 ? Math.round((value / total) * 1000) / 10 : 0,
     color: COLORS[label] || "#94a3b8",
   }));
 };
 
-
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── FREELANCER CONTROLLERS ───────────────────────────────────────────────────
+// GET /api/freelancer/transactions
 // ═══════════════════════════════════════════════════════════════════════════════
-
-// GET /api/freelancer/transactions?range=May+01+-+May+31%2C+2024
 export const getFreelancerTransactions = async (req, res) => {
   try {
     const freelancerId = req.user.userId;
     const { range }    = req.query;
-
     const wallet = await getOrCreateWallet(freelancerId, "freelancer");
 
-    // ── Date filter ──────────────────────────────────────────────────────────
     const { startDate, endDate } = parseDateRange(range);
     const dateFilter = startDate && endDate
       ? { dateValue: { $gte: startDate, $lte: endDate } }
       : {};
 
-    // ── This month transactions ──────────────────────────────────────────────
-    const now         = new Date();
+    const now            = new Date();
     const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const lastMonthEnd   = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
@@ -106,48 +94,22 @@ export const getFreelancerTransactions = async (req, res) => {
       Transaction.find({ user: freelancerId, role: "freelancer", isCredit: true, dateValue: { $gte: lastMonthStart, $lte: lastMonthEnd } }),
     ]);
 
-    // ── Metrics ──────────────────────────────────────────────────────────────
-    const platformFeesTx = transactions.filter(t => t.type === "Platform Fee");
-    const platformFees   = platformFeesTx.reduce((s, t) => s + t.amount, 0);
+    const platformFees = transactions.filter(t => t.type === "Platform Fee").reduce((s, t) => s + t.amount, 0);
 
     const metrics = [
-      {
-        id: "total-earnings", label: "Total Earnings", value: wallet.totalEarned,
-        subLabel: "Lifetime earnings", subType: "positive", icon: "wallet", color: "teal",
-      },
-      {
-        id: "available-balance", label: "Available Balance", value: wallet.balance,
-        subLabel: "Ready to withdraw", subType: "neutral", icon: "creditCard", color: "cyan",
-      },
-      {
-        id: "pending-release", label: "Pending Release", value: wallet.pendingRelease,
-        subLabel: "Awaiting approval", subType: "warning", icon: "clock", color: "amber",
-      },
-      {
-        id: "total-withdrawn", label: "Total Withdrawn", value: wallet.totalWithdrawn,
-        subLabel: "Lifetime withdrawals", subType: "neutral", icon: "arrowUp", color: "blue",
-      },
-      {
-        id: "platform-fees", label: "Platform Fees", value: platformFees,
-        subLabel: "Fees deducted", subType: "negative", icon: "percent", color: "rose",
-      },
-      {
-        id: "this-month", label: "This Month", value: thisMonthTx.reduce((s, t) => s + t.amount, 0),
-        subLabel: "Earned this month", subType: "positive", icon: "arrowDown", color: "teal",
-      },
+      { id: "total-earnings",   label: "Total Earnings",   value: wallet.totalEarned,    subLabel: "Lifetime earnings",    subType: "positive", icon: "wallet",     color: "teal"  },
+      { id: "available-balance",label: "Available Balance", value: wallet.balance,        subLabel: "Ready to withdraw",    subType: "neutral",  icon: "creditCard", color: "cyan"  },
+      { id: "pending-release",  label: "Pending Release",  value: wallet.pendingRelease, subLabel: "Awaiting approval",    subType: "warning",  icon: "clock",      color: "amber" },
+      { id: "total-withdrawn",  label: "Total Withdrawn",  value: wallet.totalWithdrawn, subLabel: "Lifetime withdrawals", subType: "neutral",  icon: "arrowUp",    color: "blue"  },
+      { id: "platform-fees",    label: "Platform Fees",    value: platformFees,          subLabel: "Fees deducted",        subType: "negative", icon: "percent",    color: "rose"  },
+      { id: "this-month",       label: "This Month",       value: thisMonthTx.reduce((s, t) => s + t.amount, 0), subLabel: "Earned this month", subType: "positive", icon: "arrowDown", color: "teal" },
     ];
 
-    // ── Chart data ───────────────────────────────────────────────────────────
-    const chartDataThisMonth = buildChartData(thisMonthTx);
-    const chartDataLastMonth = buildChartData(lastMonthTx);
-
-    // ── Breakdown ────────────────────────────────────────────────────────────
     const creditTx  = transactions.filter(t => t.isCredit);
     const breakdown = buildBreakdown(creditTx);
     const totalCredit = creditTx.reduce((s, t) => s + t.amount, 0);
 
-    // ── Format transactions ──────────────────────────────────────────────────
-    const formatted = transactions.map((tx, i) => ({
+    const formatted = transactions.map((tx) => ({
       id:          tx._id,
       type:        tx.type,
       typeIcon:    tx.typeIcon,
@@ -162,12 +124,12 @@ export const getFreelancerTransactions = async (req, res) => {
 
     res.status(200).json({
       metrics,
-      transactions:        formatted,
-      chartDataThisMonth,
-      chartDataLastMonth,
+      transactions:      formatted,
+      chartDataThisMonth: buildChartData(thisMonthTx),
+      chartDataLastMonth: buildChartData(lastMonthTx),
       breakdown,
-      totalForBreakdown:   totalCredit,
-      availableBalance:    wallet.balance,
+      totalForBreakdown:  totalCredit,
+      availableBalance:   wallet.balance,
     });
   } catch (error) {
     console.error("getFreelancerTransactions error:", error);
@@ -175,7 +137,9 @@ export const getFreelancerTransactions = async (req, res) => {
   }
 };
 
+// ═══════════════════════════════════════════════════════════════════════════════
 // POST /api/freelancer/withdraw
+// ═══════════════════════════════════════════════════════════════════════════════
 export const withdrawFunds = async (req, res) => {
   try {
     const freelancerId = req.user.userId;
@@ -186,19 +150,15 @@ export const withdrawFunds = async (req, res) => {
     }
 
     const wallet = await getOrCreateWallet(freelancerId, "freelancer");
-
     if (Number(amount) > wallet.balance) {
       return res.status(400).json({ message: "Insufficient balance" });
     }
 
     const withdrawAmount = Number(amount);
-
-    // Deduct from wallet
-    wallet.balance       -= withdrawAmount;
+    wallet.balance        -= withdrawAmount;
     wallet.totalWithdrawn += withdrawAmount;
     await wallet.save();
 
-    // Create withdrawal record
     const withdrawal = await Withdrawal.create({
       user:   freelancerId,
       amount: withdrawAmount,
@@ -206,7 +166,6 @@ export const withdrawFunds = async (req, res) => {
       status: "pending",
     });
 
-    // Create transaction record
     const now = new Date();
     await Transaction.create({
       user:        freelancerId,
@@ -223,14 +182,18 @@ export const withdrawFunds = async (req, res) => {
       dateValue:   now,
     });
 
+    // ✅ Freelancer ko — withdrawal initiated notification
+    await createNotification({
+      userId:  freelancerId,
+      type:    "PAYMENT_RECEIVED",
+      title:   "Withdrawal Initiated",
+      message: `Your withdrawal of ₹${withdrawAmount.toLocaleString("en-IN")} via ${method.toUpperCase()} has been initiated. Remaining balance: ₹${wallet.balance.toLocaleString("en-IN")}.`,
+    });
+
     res.status(201).json({
-      success: true,
-      message: "Withdrawal initiated successfully",
-      withdrawal: {
-        _id:    withdrawal._id,
-        amount: withdrawal.amount,
-        status: withdrawal.status,
-      },
+      success:    true,
+      message:    "Withdrawal initiated successfully",
+      withdrawal: { _id: withdrawal._id, amount: withdrawal.amount, status: withdrawal.status },
       newBalance: wallet.balance,
     });
   } catch (error) {
@@ -239,17 +202,13 @@ export const withdrawFunds = async (req, res) => {
   }
 };
 
-
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── CLIENT CONTROLLERS ───────────────────────────────────────────────────────
+// GET /api/client/transactions
 // ═══════════════════════════════════════════════════════════════════════════════
-
-// GET /api/client/transactions?range=May+01+-+May+31%2C+2024
 export const getClientTransactions = async (req, res) => {
   try {
     const clientId  = req.user.userId;
     const { range } = req.query;
-
     const wallet = await getOrCreateWallet(clientId, "client");
 
     const { startDate, endDate } = parseDateRange(range);
@@ -268,48 +227,21 @@ export const getClientTransactions = async (req, res) => {
       Transaction.find({ user: clientId, role: "client", isCredit: false, dateValue: { $gte: lastMonthStart, $lte: lastMonthEnd } }),
     ]);
 
-    // ── Metrics ──────────────────────────────────────────────────────────────
-    const platformFees = transactions
-      .filter(t => t.type === "Platform Fee")
-      .reduce((s, t) => s + t.amount, 0);
+    const platformFees = transactions.filter(t => t.type === "Platform Fee").reduce((s, t) => s + t.amount, 0);
 
     const metrics = [
-      {
-        id: "total-spent", label: "Total Spent", value: wallet.totalSpent,
-        subLabel: "Lifetime spending", subType: "negative", icon: "wallet", color: "teal",
-      },
-      {
-        id: "escrow-held", label: "Escrow Held", value: wallet.escrowHeld,
-        subLabel: "In active contracts", subType: "neutral", icon: "lock", color: "blue",
-      },
-      {
-        id: "pending-release", label: "Pending Release", value: wallet.pendingRelease,
-        subLabel: "Awaiting approval", subType: "warning", icon: "clock", color: "amber",
-      },
-      {
-        id: "wallet-balance", label: "Wallet Balance", value: wallet.balance,
-        subLabel: "Available to pay", subType: "neutral", icon: "creditCard", color: "cyan",
-      },
-      {
-        id: "total-released", label: "Total Released", value: wallet.totalReleased,
-        subLabel: "Paid to freelancers", subType: "positive", icon: "arrowUp", color: "teal",
-      },
-      {
-        id: "platform-fees", label: "Platform Fees", value: platformFees,
-        subLabel: "Fees charged", subType: "negative", icon: "percent", color: "rose",
-      },
+      { id: "total-spent",     label: "Total Spent",     value: wallet.totalSpent,     subLabel: "Lifetime spending",   subType: "negative", icon: "wallet",     color: "teal"  },
+      { id: "escrow-held",     label: "Escrow Held",     value: wallet.escrowHeld,     subLabel: "In active contracts", subType: "neutral",  icon: "lock",       color: "blue"  },
+      { id: "pending-release", label: "Pending Release", value: wallet.pendingRelease, subLabel: "Awaiting approval",   subType: "warning",  icon: "clock",      color: "amber" },
+      { id: "wallet-balance",  label: "Wallet Balance",  value: wallet.balance,        subLabel: "Available to pay",    subType: "neutral",  icon: "creditCard", color: "cyan"  },
+      { id: "total-released",  label: "Total Released",  value: wallet.totalReleased,  subLabel: "Paid to freelancers", subType: "positive", icon: "arrowUp",    color: "teal"  },
+      { id: "platform-fees",   label: "Platform Fees",   value: platformFees,          subLabel: "Fees charged",        subType: "negative", icon: "percent",    color: "rose"  },
     ];
 
-    // ── Chart data ───────────────────────────────────────────────────────────
-    const chartDataThisMonth = buildChartData(thisMonthTx);
-    const chartDataLastMonth = buildChartData(lastMonthTx);
-
-    // ── Breakdown ────────────────────────────────────────────────────────────
-    const debitTx   = transactions.filter(t => !t.isCredit);
-    const breakdown = buildBreakdown(debitTx);
+    const debitTx    = transactions.filter(t => !t.isCredit);
+    const breakdown  = buildBreakdown(debitTx);
     const totalDebit = debitTx.reduce((s, t) => s + t.amount, 0);
 
-    // ── Format transactions ──────────────────────────────────────────────────
     const formatted = transactions.map((tx) => ({
       id:          tx._id,
       type:        tx.type,
@@ -325,12 +257,12 @@ export const getClientTransactions = async (req, res) => {
 
     res.status(200).json({
       metrics,
-      transactions:        formatted,
-      chartDataThisMonth,
-      chartDataLastMonth,
+      transactions:       formatted,
+      chartDataThisMonth: buildChartData(thisMonthTx),
+      chartDataLastMonth: buildChartData(lastMonthTx),
       breakdown,
-      totalForBreakdown:   totalDebit,
-      walletBalance:       wallet.balance,
+      totalForBreakdown:  totalDebit,
+      walletBalance:      wallet.balance,
     });
   } catch (error) {
     console.error("getClientTransactions error:", error);
@@ -338,7 +270,9 @@ export const getClientTransactions = async (req, res) => {
   }
 };
 
+// ═══════════════════════════════════════════════════════════════════════════════
 // POST /api/client/add-funds
+// ═══════════════════════════════════════════════════════════════════════════════
 export const addFunds = async (req, res) => {
   try {
     const clientId = req.user.userId;
@@ -351,11 +285,9 @@ export const addFunds = async (req, res) => {
     const addAmount = Number(amount);
     const wallet    = await getOrCreateWallet(clientId, "client");
 
-    // Add to wallet
     wallet.balance += addAmount;
     await wallet.save();
 
-    // Create transaction record
     const now = new Date();
     await Transaction.create({
       user:        clientId,
@@ -370,6 +302,14 @@ export const addFunds = async (req, res) => {
       date:        formatDate(now),
       time:        formatTime(now),
       dateValue:   now,
+    });
+
+    // ✅ Client ko — wallet top-up notification
+    await createNotification({
+      userId:  clientId,
+      type:    "PAYMENT_RECEIVED",
+      title:   "Wallet Topped Up",
+      message: `₹${addAmount.toLocaleString("en-IN")} added via ${method.toUpperCase()}. New balance: ₹${wallet.balance.toLocaleString("en-IN")}.`,
     });
 
     res.status(201).json({

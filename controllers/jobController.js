@@ -1,41 +1,34 @@
 import Job from "../models/Jobs.js";
 import User from "../models/User.js";
-import SavedJob from "../models/SavedJob.js"; // ✅ NEW
+import SavedJob from "../models/SavedJob.js";
 import Application from "../models/applicationJob.js";
 import RecentlyViewedJob from "../models/recentlyViewJob.js";
-import mongoose from "mongoose"; // ✅ NEW
-
+import mongoose from "mongoose";
 import { getKeywordsForCategory } from "../models/JobKeyMap.js";
-// import Job from "../models/Job.js";      // apna path use karo
+import { createNotification } from "./notificationController.js"; // ✅ ADD THIS
 
 export const searchJobs = async (req, res) => {
   try {
     const {
-      search,
-      category,
-      experience,        // frontend "experience" bhejta hai
-      experienceLevel,   // fallback
-      clientHistory,
-      minBudget,
-      maxBudget,
-      consultation,
-      projectLength,
+      search, category, experience, experienceLevel,
+      clientHistory, minBudget, maxBudget,
+      consultation, projectLength,
+      page = 1,
+      limit = 10,
     } = req.query;
-
-    let query = {
-      status: "published",
-    };
-
-    // ─── 🔍 SEARCH BAR ────────────────────────────────────────────────────────
-    // JobId exact match, title, skills, description fuzzy match
+ 
+    const pageNum  = Math.max(1, parseInt(page));
+    const limitNum = Math.min(50, Math.max(1, parseInt(limit)));
+    const skip     = (pageNum - 1) * limitNum;
+ 
+    let query = { status: "published" };
+ 
+    // 🔍 SEARCH
     if (search && search.trim()) {
       const s = search.trim();
-
-      // JobId exact match (JOB-345 format)
       if (s.toUpperCase().startsWith("JOB-")) {
         query.jobId = { $regex: `^${s}$`, $options: "i" };
       } else {
-        // Title + Skills + Description mein search
         query.$or = [
           { title:       { $regex: s, $options: "i" } },
           { skills:      { $elemMatch: { $regex: s, $options: "i" } } },
@@ -43,93 +36,70 @@ export const searchJobs = async (req, res) => {
         ];
       }
     }
-
-    // ─── 📂 CATEGORY ─────────────────────────────────────────────────────────
-    // Category field nahi hai schema mein — title + skills se match karo
+ 
+    // 📂 CATEGORY
     if (category && category !== "All") {
       const keywords = getKeywordsForCategory(category);
-
       if (keywords.length > 0) {
         const categoryConditions = [
-          // Title mein koi bhi keyword match ho
-          ...keywords.map((kw) => ({
-            title: { $regex: kw, $options: "i" },
-          })),
-          // Skills mein koi bhi keyword match ho
-          ...keywords.map((kw) => ({
-            skills: { $elemMatch: { $regex: kw, $options: "i" } },
-          })),
+          ...keywords.map((kw) => ({ title: { $regex: kw, $options: "i" } })),
+          ...keywords.map((kw) => ({ skills: { $elemMatch: { $regex: kw, $options: "i" } } })),
         ];
-
-        // Agar search $or already hai toh category ko $and se add karo
         if (query.$or) {
-          query.$and = [
-            { $or: query.$or },
-            { $or: categoryConditions },
-          ];
+          query.$and = [{ $or: query.$or }, { $or: categoryConditions }];
           delete query.$or;
         } else {
           query.$or = categoryConditions;
         }
       }
     }
-
-    // ─── 💼 EXPERIENCE LEVEL ─────────────────────────────────────────────────
+ 
+    // 💼 EXPERIENCE
     const expLevel = experience || experienceLevel;
     if (expLevel && expLevel !== "All") {
       query.experienceLevel = { $regex: expLevel, $options: "i" };
     }
-
-    // ─── 👤 CLIENT HISTORY ────────────────────────────────────────────────────
-    // clientId ke through client ka totalJobs check karo
+ 
+    // 👤 CLIENT HISTORY
     if (clientHistory && clientHistory !== "All") {
       let hiresCondition = {};
-
-      if (clientHistory === "No hires") {
-        hiresCondition = { $or: [{ totalJobs: 0 }, { totalJobs: { $exists: false } }] };
-      } else if (clientHistory === "1 to 9 hires") {
-        hiresCondition = { totalJobs: { $gte: 1, $lte: 9 } };
-      } else if (clientHistory === "10+ hires") {
-        hiresCondition = { totalJobs: { $gte: 10 } };
-      }
-
-      // Client users nikalo jo condition match kare
+      if (clientHistory === "No hires")      hiresCondition = { $or: [{ totalJobs: 0 }, { totalJobs: { $exists: false } }] };
+      if (clientHistory === "1 to 9 hires")  hiresCondition = { totalJobs: { $gte: 1, $lte: 9 } };
+      if (clientHistory === "10+ hires")     hiresCondition = { totalJobs: { $gte: 10 } };
+ 
       const matchingClients = await mongoose.model("User").find(
-        { role: "client", ...hiresCondition },
-        { _id: 1 }
+        { role: "client", ...hiresCondition }, { _id: 1 }
       ).lean();
-
-      const clientIds = matchingClients.map((c) => c._id);
-      query.clientId = { $in: clientIds };
+      query.clientId = { $in: matchingClients.map((c) => c._id) };
     }
-
-    // ─── 💰 BUDGET RANGE ──────────────────────────────────────────────────────
+ 
+    // 💰 BUDGET
     if (minBudget || maxBudget) {
       query.budget = {};
       if (minBudget) query.budget.$gte = Number(minBudget);
       if (maxBudget) query.budget.$lte = Number(maxBudget);
     }
-
-    // ─── 🤝 CONSULTATION / NEGOTIATION ───────────────────────────────────────
-    if (consultation === "true") {
-      query.allowNegotiation = true;
-    }
-
-    // ─── 📦 FETCH ─────────────────────────────────────────────────────────────
-    let jobs = await Job.find(query)
-      .populate("clientId", "firstName lastName totalJobs photo")
-      .sort({ createdAt: -1 })
-      .lean();
-
-    // ─── ⏳ PROJECT LENGTH (deadline based filter) ────────────────────────────
+ 
+    // 🤝 CONSULTATION
+    if (consultation === "true") query.allowNegotiation = true;
+ 
+    // ── Fetch with pagination ─────────────────────────────────────────────────
+    let [jobs, totalCount] = await Promise.all([
+      Job.find(query)
+        .populate("clientId", "firstName lastName totalJobs photo")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+      Job.countDocuments(query),
+    ]);
+ 
+    // ⏳ PROJECT LENGTH (deadline filter — post DB)
     if (projectLength && projectLength !== "All") {
       const now = new Date();
-
       jobs = jobs.filter((job) => {
         if (!job.deadline) return false;
-        const deadline = new Date(job.deadline);
-        const diffDays = (deadline - now) / (1000 * 60 * 60 * 24);
-
+        const diffDays = (new Date(job.deadline) - now) / (1000 * 60 * 60 * 24);
         if (projectLength === "Less than 1 week")   return diffDays < 7;
         if (projectLength === "Less than 1 month")  return diffDays < 30;
         if (projectLength === "1 to 3 months")      return diffDays >= 30 && diffDays <= 90;
@@ -138,13 +108,16 @@ export const searchJobs = async (req, res) => {
         return true;
       });
     }
-
+ 
     res.json({
       success: true,
       count: jobs.length,
+      totalCount,
+      hasMore: skip + limitNum < totalCount,
+      page: pageNum,
       jobs,
     });
-
+ 
   } catch (error) {
     console.log("SEARCH JOB ERROR:", error);
     res.status(500).json({ message: "Server error" });
@@ -153,212 +126,126 @@ export const searchJobs = async (req, res) => {
 
 export const getMyJobs = async (req, res) => {
   try {
-    const userId = req.user.userId; // 🔥 from token
-
-    const jobs = await Job.find({ clientId: userId }).sort({ createdAt: -1 });
-
-    res.json({
-      success: true,
-      jobs,
-    });
-
+    const jobs = await Job.find({ clientId: req.user.userId }).sort({ createdAt: -1 });
+    res.json({ success: true, jobs });
   } catch (error) {
     console.log("GET MY JOBS ERROR:", error);
     res.status(500).json({ message: "Server error" });
   }
 };
 
-
 export const postJob = async (req, res) => {
   try {
     const {
-      title,
-      description,
-      budget,
-      skills,
-      experienceLevel,
-      deadline,
-      visibility,
-      allowNegotiation,
-      status,
+      title, description, budget, skills, experienceLevel,
+      deadline, visibility, allowNegotiation, status,
     } = req.body;
 
-    // 🔥 USER FROM TOKEN
-    const clientId = req.user.userId;
-
-    // 🔥 AUTO GENERATE JOB ID
-    const jobId = "JOB-" + Math.floor(Math.random() * 1000000);
-
-    // 🔥 CREATE JOB
     const job = await Job.create({
-      title,
-      description,
-      budget,
-      skills,
-      experienceLevel,
-      deadline,
-      visibility,
-      allowNegotiation,
-      clientId,
-
-      status: status || "draft",
-
-      // ✅ NEW FIELDS
-      jobId,
-      proposals: 0,
+      title, description, budget, skills, experienceLevel,
+      deadline, visibility, allowNegotiation,
+      clientId:   req.user.userId,
+      status:     status || "draft",
+      jobId:      "JOB-" + Math.floor(Math.random() * 1000000),
+      proposals:  0,
       postedTime: new Date(),
     });
 
     res.status(201).json({
       success: true,
-      message:
-        status === "draft"
-          ? "Job saved as draft"
-          : "Job posted successfully",
+      message: status === "draft" ? "Job saved as draft" : "Job posted successfully",
       job,
     });
-
   } catch (error) {
     console.log("POST JOB ERROR:", error);
     res.status(500).json({ message: "Server error" });
   }
 };
 
-
 export const getFreelancerCurrentJobs = async (req, res) => {
   try {
-    const freelancerId = req.user.userId; // ✅ FIXED
-
-    const jobs = await Job.find({
-      assignedFreelancer: freelancerId
-    });
-
+    const jobs = await Job.find({ assignedFreelancer: req.user.userId });
     const formattedJobs = jobs.map(job => ({
-      _id: job._id, // ✅ ADD THIS
-      title: job.title,
-      description: job.description,
-      skills: job.skills,
-      budget: job.budget,
-      deadline: job.deadline,
-      proposal: job.proposals || null,
+      _id:             job._id,
+      jobId:           job.jobId,
+      title:           job.title,
+      description:     job.description,
+      skills:          job.skills,
+      budget:          job.budget,
+      deadline:        job.deadline,
+      proposal:        job.proposals || null,
       paymentVerified: job.paymentVerified,
-      postedTime: job.createdAt
+      postedTime:      job.createdAt,
     }));
-
-    res.json({
-      success: true,
-      count: formattedJobs.length,
-      data: formattedJobs
-    });
-
+    res.json({ success: true, count: formattedJobs.length, data: formattedJobs });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Error fetching current jobs"
-    });
+    res.status(500).json({ success: false, message: "Error fetching current jobs" });
   }
 };
 
-
-// ─── ONLY THIS FUNCTION CHANGED in jobController.js ─────────────────────────
-// Replace your existing getJobById with this one.
-// Everything else in the file stays exactly the same.
-
 export const getJobById = async (req, res) => {
   try {
-    const userId = req.user?.userId;
+    const userId    = req.user?.userId;
     const { jobId } = req.params;
 
     const job = await Job.findById(jobId);
-    if (!job) {
-      return res.status(404).json({ success: false, message: "Job not found" });
-    }
+    if (!job) return res.status(404).json({ success: false, message: "Job not found" });
 
-    let isSaved    = false;
-    let isApplied  = false;
-    let isRejected = false; // ✅ NEW
-
+    let isSaved = false, isApplied = false, isRejected = false;
     if (userId) {
-      const savedJob = await SavedJob.findOne({ user: userId, job: jobId });
-      isSaved = !!savedJob;
-
-      const applied = await Application.findOne({ user: userId, job: jobId });
-      isApplied  = !!applied;
-      // ✅ isRejected: applied but status is rejected
-      isRejected = applied?.status === "rejected";
+      isSaved    = !!(await SavedJob.findOne({ user: userId, job: jobId }));
+      const app  = await Application.findOne({ user: userId, job: jobId });
+      isApplied  = !!app;
+      isRejected = app?.status === "rejected";
     }
 
-    res.json({
-      success: true,
-      data: {
-        ...job.toObject(),
-        isSaved,
-        isApplied,
-        isRejected, // ✅ NEW
-      },
-    });
+    res.json({ success: true, data: { ...job.toObject(), isSaved, isApplied, isRejected } });
   } catch (error) {
     console.log("GET JOB ERROR:", error);
     res.status(500).json({ success: false, message: "Server error" });
   }
 };
 
-
-
-// Apply button api when user clicks apply on job details page. If already applied, it will unapply. So toggle logic in one API.
-// ✅ FIXED: Toggle Apply / Unapply (one API)
 export const applyJob = async (req, res) => {
   try {
-    const freelancerId = req.user.userId;
-    const { jobId } = req.params;
+    const freelancerId       = req.user.userId;
+    const { jobId }          = req.params;
     const { proposal, bidAmount } = req.body;
 
-    if (!freelancerId) {
-      return res.status(401).json({ message: "Unauthorized" });
-    }
+    if (!freelancerId) return res.status(401).json({ message: "Unauthorized" });
 
     const job = await Job.findById(jobId);
-    if (!job) {
-      return res.status(404).json({ message: "Job not found" });
-    }
+    if (!job) return res.status(404).json({ message: "Job not found" });
 
-    // Check if already applied
-    const existingApplication = await Application.findOne({
-      user: freelancerId,
-      job: jobId,
-    });
+    const existingApplication = await Application.findOne({ user: freelancerId, job: jobId });
 
     if (existingApplication) {
-      // ✅ UNAPPLY — delete application and decrement proposals
+      // ── UNAPPLY ──────────────────────────────────────────────────────────
       await Application.deleteOne({ user: freelancerId, job: jobId });
-
-      job.proposals = Math.max((job.proposals || 1) - 1, 0); // never go below 0
+      job.proposals = Math.max((job.proposals || 1) - 1, 0);
       await job.save();
 
-      return res.json({
-        success: true,
-        applied: false,
-        message: "Application cancelled successfully",
-      });
+      return res.json({ success: true, applied: false, message: "Application cancelled successfully" });
     }
 
-    // ✅ APPLY — create application and increment proposals
-    await Application.create({
-      user: freelancerId,
-      job: jobId,
-      proposal,
-      bidAmount,
-    });
-
+    // ── APPLY ────────────────────────────────────────────────────────────
+    await Application.create({ user: freelancerId, job: jobId, proposal, bidAmount });
     job.proposals = (job.proposals || 0) + 1;
     await job.save();
 
-    return res.json({
-      success: true,
-      applied: true,
-      message: "Applied successfully",
+    // ✅ Client ko — freelancer ne job pe apply kiya
+    const freelancer = await User.findById(freelancerId).select("firstName lastName");
+    const name       = freelancer ? `${freelancer.firstName} ${freelancer.lastName}`.trim() : "A freelancer";
+
+    await createNotification({
+      userId:      job.clientId,
+      type:        "JOB_APPLIED",
+      title:       "New Proposal Received",
+      message:     `${name} submitted a proposal for "${job.title}".${bidAmount ? ` Bid: ₹${Number(bidAmount).toLocaleString("en-IN")}` : ""}`,
+      referenceId: job._id,
     });
 
+    return res.json({ success: true, applied: true, message: "Applied successfully" });
   } catch (error) {
     console.log("APPLY JOB ERROR:", error);
     res.status(500).json({ message: "Server error" });
@@ -368,80 +255,43 @@ export const applyJob = async (req, res) => {
 export const getAppliedJobs = async (req, res) => {
   try {
     const userId = req.user?.userId;
-
-    if (!userId) {
-      return res.status(401).json({ message: "Unauthorized" });
-    }
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
 
     const applications = await Application.find({ user: userId })
-      .populate({
-        path:   "job",
-        select: "title description budget skills experienceLevel proposals postedTime",
-      })
+      .populate({ path: "job", select: "title description budget skills experienceLevel proposals postedTime jobId" })
       .sort({ createdAt: -1 });
 
-    // filter out any whose job was deleted
     const validApplications = applications
       .filter((a) => a.job !== null)
       .map((a) => ({
         ...a.job.toObject(),
-        isApplied:  true,
-        bidAmount:  a.bidAmount,
-        proposal:   a.proposal,
-        appliedAt:  a.createdAt,
+        isApplied: true,
+        bidAmount: a.bidAmount,
+        proposal:  a.proposal,
+        appliedAt: a.createdAt,
       }));
 
-    res.json({
-      success: true,
-      count:   validApplications.length,
-      data:    validApplications,
-    });
-
+    res.json({ success: true, count: validApplications.length, data: validApplications });
   } catch (error) {
     console.log("GET APPLIED JOBS ERROR:", error);
     res.status(500).json({ message: "Server error" });
   }
 };
 
-
 export const toggleSaveJob = async (req, res) => {
   try {
-    const userId = req.user?.userId;
+    const userId    = req.user?.userId;
     const { jobId } = req.params;
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
 
-    if (!userId) {
-      return res.status(401).json({ message: "Unauthorized" });
-    }
-
-    // ✅ Check if already saved in SavedJob collection
-    const existing = await SavedJob.findOne({
-      user: userId,
-      job: jobId,
-    });
-
+    const existing = await SavedJob.findOne({ user: userId, job: jobId });
     if (existing) {
-      // ❌ UNSAVE — delete the document
       await SavedJob.deleteOne({ user: userId, job: jobId });
-
-      return res.json({
-        success: true,
-        saved: false,
-        message: "Job removed from saved",
-      });
+      return res.json({ success: true, saved: false, message: "Job removed from saved" });
     }
 
-    // ✅ SAVE — create new document
-    await SavedJob.create({
-      user: userId,
-      job: jobId,
-    });
-
-    return res.json({
-      success: true,
-      saved: true,
-      message: "Job saved successfully",
-    });
-
+    await SavedJob.create({ user: userId, job: jobId });
+    return res.json({ success: true, saved: true, message: "Job saved successfully" });
   } catch (error) {
     console.log("SAVE JOB ERROR:", error);
     res.status(500).json({ message: "Server error" });
@@ -451,33 +301,17 @@ export const toggleSaveJob = async (req, res) => {
 export const getSavedJobs = async (req, res) => {
   try {
     const userId = req.user?.userId;
-
-    if (!userId) {
-      return res.status(401).json({ message: "Unauthorized" });
-    }
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
 
     const savedJobs = await SavedJob.find({ user: userId })
-      .populate({
-        path:   "job",
-        select: "title description budget skills experienceLevel proposals postedTime",
-      })
+      .populate({ path: "job", select: "title description budget skills experienceLevel proposals postedTime" })
       .sort({ createdAt: -1 });
 
-    // filter out any whose job was deleted
     const validJobs = savedJobs
       .filter((s) => s.job !== null)
-      .map((s) => ({
-        ...s.job.toObject(),
-        isSaved:   true,
-        savedAt:   s.createdAt,
-      }));
+      .map((s) => ({ ...s.job.toObject(), isSaved: true, savedAt: s.createdAt }));
 
-    res.json({
-      success: true,
-      count:   validJobs.length,
-      data:    validJobs,
-    });
-
+    res.json({ success: true, count: validJobs.length, data: validJobs });
   } catch (error) {
     console.log("GET SAVED JOBS ERROR:", error);
     res.status(500).json({ message: "Server error" });
@@ -486,33 +320,23 @@ export const getSavedJobs = async (req, res) => {
 
 export const trackJobView = async (req, res) => {
   try {
-    const userId  = req.user?.userId;
+    const userId    = req.user?.userId;
     const { jobId } = req.params;
-
     if (!userId) return res.status(401).json({ message: "Unauthorized" });
 
     const job = await Job.findById(jobId);
     if (!job) return res.status(404).json({ message: "Job not found" });
 
-    // ✅ Remove if already exists (to re-add at top as most recent)
     await RecentlyViewedJob.deleteOne({ user: userId, job: jobId });
-
-    // ✅ Add fresh entry
     await RecentlyViewedJob.create({ user: userId, job: jobId });
 
-    // ✅ Keep only latest 100 views per user (cleanup old)
     const allViews = await RecentlyViewedJob.find({ user: userId })
-      .sort({ createdAt: -1 })
-      .select("_id")
-      .skip(100);
-
+      .sort({ createdAt: -1 }).select("_id").skip(100);
     if (allViews.length > 0) {
-      const idsToDelete = allViews.map((v) => v._id);
-      await RecentlyViewedJob.deleteMany({ _id: { $in: idsToDelete } });
+      await RecentlyViewedJob.deleteMany({ _id: { $in: allViews.map((v) => v._id) } });
     }
 
     res.json({ success: true, message: "View tracked" });
-
   } catch (error) {
     console.log("TRACK VIEW ERROR:", error);
     res.status(500).json({ message: "Server error" });
@@ -527,36 +351,94 @@ export const getRecentlyViewedJobs = async (req, res) => {
     const page  = parseInt(req.query.page)  || 1;
     const limit = parseInt(req.query.limit) || 10;
     const skip  = (page - 1) * limit;
-
     const total = await RecentlyViewedJob.countDocuments({ user: userId });
 
     const recentJobs = await RecentlyViewedJob.find({ user: userId })
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .populate({
-        path:   "job",
-        select: "title description budget skills experienceLevel proposals postedTime",
-      });
+      .sort({ createdAt: -1 }).skip(skip).limit(limit)
+      .populate({ path: "job", select: "title description budget skills experienceLevel proposals postedTime jobId" });
 
     const validJobs = recentJobs
       .filter((r) => r.job !== null)
-      .map((r) => ({
-        ...r.job.toObject(),
-        viewedAt: r.createdAt,
-      }));
+      .map((r) => ({ ...r.job.toObject(), viewedAt: r.createdAt }));
 
-    res.json({
-      success:  true,
-      data:     validJobs,
-      page,
-      limit,
-      total,
-      hasMore:  skip + limit < total, // ✅ frontend uses this to stop fetching
-    });
-
+    res.json({ success: true, data: validJobs, page, limit, total, hasMore: skip + limit < total });
   } catch (error) {
     console.log("GET RECENT VIEWED ERROR:", error);
     res.status(500).json({ message: "Server error" });
+  }
+};
+
+export const getSingleJob = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const job = await Job.findById(id);
+
+    if (!job) {
+      return res.status(404).json({
+        success: false,
+        message: "Job not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      job,
+    });
+  } catch (error) {
+    console.error("Get Job Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Server Error",
+    });
+  }
+};
+
+export const updateJob = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const updatedJob = await Job.findOneAndUpdate(
+      {
+        _id: id,
+        clientId: req.user.id,
+      },
+      {
+        title: req.body.title,
+        description: req.body.description,
+        experienceLevel: req.body.experienceLevel,
+        skills: req.body.skills,
+        budget: req.body.budget,
+        deadline: req.body.deadline,
+        allowNegotiation: req.body.allowNegotiation,
+        visibility: req.body.visibility,
+        status: req.body.status,
+      },
+      {
+        new: true,
+        runValidators: true,
+      }
+    );
+
+    if (!updatedJob) {
+      return res.status(404).json({
+        success: false,
+        message: "Job not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Job updated successfully",
+      job: updatedJob,
+    });
+  } catch (error) {
+    console.error("Update Job Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Server Error",
+    });
   }
 };

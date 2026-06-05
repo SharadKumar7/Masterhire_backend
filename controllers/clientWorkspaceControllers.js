@@ -1,6 +1,7 @@
 import Job from "../models/Jobs.js";
 import User from "../models/User.js";
 import { getFileType, formatFileSize } from "../middleware/upload.js";
+import { createNotification } from "./notificationController.js"; // ✅ ADD THIS
 
 // ─── Helper: ensure arrays exist on old jobs ──────────────────────────────────
 const ensureArrays = (job) => {
@@ -40,7 +41,6 @@ export const getJobDetails = async (req, res) => {
 
     if (!job) return res.status(404).json({ message: "Job not found" });
 
-    // ── CLIENT only ──
     if (job.clientId._id.toString() !== req.user.userId?.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
@@ -95,14 +95,13 @@ export const getFreelancerJobDetails = async (req, res) => {
 
     if (!job) return res.status(404).json({ message: "Job not found" });
 
-    // ── FREELANCER only ──
     if (!job.assignedFreelancer || job.assignedFreelancer._id.toString() !== req.user.userId?.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
 
     ensureArrays(job);
+    console.log("Job's clientId:", job.clientId);
 
-    // Shape client info for freelancer view
     const c = job.clientId;
     const client = {
       _id:        c._id,
@@ -140,7 +139,9 @@ export const getFreelancerJobDetails = async (req, res) => {
 // ─── GET /api/freelancer/:id/profile ─────────────────────────────────────────
 export const getFreelancerProfile = async (req, res) => {
   try {
-    const user = await User.findById(req.params.id).select("-password -otp -otpExpiry -deleteOtp -deleteOtpExpiry");
+    const user = await User.findById(req.params.id).select(
+      "-password -otp -otpExpiry -deleteOtp -deleteOtpExpiry"
+    );
     if (!user || user.role !== "freelancer") {
       return res.status(404).json({ message: "Freelancer not found" });
     }
@@ -153,16 +154,15 @@ export const getFreelancerProfile = async (req, res) => {
 // ─── POST /api/job/:id/milestones ─────────────────────────────────────────────
 export const addMilestone = async (req, res) => {
   try {
-
     console.log("=== ADD MILESTONE HIT ===");
     console.log("jobId:", req.params.id);
     console.log("userId:", req.user.userId);
     console.log("body:", req.body);
-    
+
     const job = await Job.findById(req.params.id);
     console.log("job found:", !!job);
     console.log("job clientId:", job?.clientId?.toString());
-    
+
     if (!job) return res.status(404).json({ message: "Job not found" });
     if (job.clientId.toString() !== req.user.userId?.toString()) {
       return res.status(403).json({ message: "Access denied" });
@@ -189,6 +189,17 @@ export const addMilestone = async (req, res) => {
     });
 
     await job.save();
+
+    // ✅ Freelancer ko — client ne naya milestone add kiya
+    if (job.assignedFreelancer) {
+      await createNotification({
+        userId:      job.assignedFreelancer,
+        type:        "JOB_APPLIED",
+        title:       "New Milestone Added",
+        message:     `Client added a new milestone "${title}" (₹${Number(budget).toLocaleString("en-IN")}) to "${job.title}".`,
+        referenceId: job._id,
+      });
+    }
 
     const added = job.milestones[job.milestones.length - 1];
     res.status(201).json({ message: "Milestone added", milestone: added });
@@ -217,12 +228,23 @@ export const updateMilestoneStatus = async (req, res) => {
     if (action === "approve") {
       ms.status     = "approved";
       ms.reviewNote = reviewNote || "";
-      // TODO: payment integration
       job.activityLog.unshift({
         label:   `Milestone "${ms.title}" approved`,
         meta:    `₹${ms.budget.toLocaleString("en-IN")} payment pending`,
         primary: true,
       });
+
+      // ✅ Freelancer ko — milestone approved
+      if (job.assignedFreelancer) {
+        await createNotification({
+          userId:      job.assignedFreelancer,
+          type:        "JOB_COMPLETED",
+          title:       "Milestone Approved! 🎉",
+          message:     `Your milestone "${ms.title}" for "${job.title}" has been approved. Payment will be released shortly.`,
+          referenceId: job._id,
+        });
+      }
+
     } else if (action === "request_changes") {
       ms.status     = "changes_requested";
       ms.reviewNote = reviewNote || "";
@@ -230,6 +252,18 @@ export const updateMilestoneStatus = async (req, res) => {
         label: `Changes requested on "${ms.title}"`,
         meta:  reviewNote || "Client requested revisions",
       });
+
+      // ✅ Freelancer ko — changes requested
+      if (job.assignedFreelancer) {
+        await createNotification({
+          userId:      job.assignedFreelancer,
+          type:        "JOB_APPLIED",
+          title:       "Changes Requested",
+          message:     `Client requested changes on milestone "${ms.title}" for "${job.title}". ${reviewNote ? `Note: ${reviewNote}` : ""}`,
+          referenceId: job._id,
+        });
+      }
+
     } else {
       return res.status(400).json({ message: "Invalid action" });
     }
@@ -261,7 +295,7 @@ export const submitMilestone = async (req, res) => {
       return res.status(400).json({ message: "Milestone already approved" });
     }
 
-    const baseUrl      = `${req.protocol}://${req.get("host")}`;
+    const baseUrl       = `${req.protocol}://${req.get("host")}`;
     const uploadedFiles = (req.files || []).map((file) => ({
       name:       file.originalname,
       url:        `${baseUrl}/uploads/${file.filename}`,
@@ -295,6 +329,16 @@ export const submitMilestone = async (req, res) => {
     });
 
     await job.save();
+
+    // ✅ Client ko — freelancer ne milestone submit kiya
+    await createNotification({
+      userId:      job.clientId,
+      type:        "JOB_APPLIED",
+      title:       "Milestone Submitted for Review",
+      message:     `Freelancer submitted milestone "${ms.title}" for "${job.title}". Please review and approve.`,
+      referenceId: job._id,
+    });
+
     res.json({ message: "Milestone submitted", milestone: ms });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -358,6 +402,28 @@ export const uploadJobFile = async (req, res) => {
     });
 
     await job.save();
+
+    // ✅ Notify the OTHER party about file upload
+    if (role === "client" && job.assignedFreelancer) {
+      // Client uploaded → notify freelancer
+      await createNotification({
+        userId:      job.assignedFreelancer,
+        type:        "JOB_APPLIED",
+        title:       "New File Uploaded",
+        message:     `Client uploaded ${newFiles.length} file(s) to "${job.title}".`,
+        referenceId: job._id,
+      });
+    } else if (role === "freelancer") {
+      // Freelancer uploaded → notify client
+      await createNotification({
+        userId:      job.clientId,
+        type:        "JOB_APPLIED",
+        title:       "New File Uploaded",
+        message:     `Freelancer uploaded ${newFiles.length} file(s) to "${job.title}".`,
+        referenceId: job._id,
+      });
+    }
+
     res.status(201).json({ message: "Files uploaded", files: newFiles });
   } catch (err) {
     res.status(500).json({ message: err.message });

@@ -13,7 +13,10 @@ import {
   updateUPI,
   updateNotifications,
   deleteAccount,
-  sendDeleteOTP
+  sendDeleteOTP,
+  withdrawMoney,
+  changePassword,
+  logoutAllDevices,
 } from "../controllers/freelancerAccountController.js"; // ✅ add .js
 
 // ✅ Apply auth middleware to all routes
@@ -22,24 +25,28 @@ router.use(protect);
 // ================= ROUTES =================
 
 // 🔹 Get current user profile
-router.get("/me", getProfile);
+router.get("/me", protect, getProfile);
 
 // 🔹 Update contact info (phone, email etc.)
-router.patch("/contact", updateContact);
+router.patch("/contact", protect, updateContact);
 
 // 🔹 Update profile settings (bio, title, skills etc.)
-router.patch("/profile", updateProfileSettings);
+router.patch("/profile", protect, updateProfileSettings);
 
 // 🔹 Update UPI / payment info
-router.patch("/upi", updateUPI);
+router.patch("/upi", protect, updateUPI);
 
 // 🔹 Update notification preferences
-router.patch("/notifications", updateNotifications);
+router.patch("/notifications", protect, updateNotifications);
 
 // 🔹 Send OTP before delete
-router.post("/send-otp", sendDeleteOTP);
+router.post("/send-otp", protect, sendDeleteOTP);
 
 // 🔹 Delete account (after OTP verification)
-router.delete("/delete", deleteAccount);
+router.delete("/delete", protect, deleteAccount);
+
+router.post("/withdraw", protect, withdrawMoney);
+router.patch("/change-password", protect, changePassword);
+router.post("/logout-all", protect, logoutAllDevices);
 
 export default router;

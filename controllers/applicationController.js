@@ -191,6 +191,7 @@ export const updateApplicationStatus = async (req, res) => {
     const { applicationId } = req.params;
     const { status, bidAmount } = req.body;
     const clientId = req.user.userId;
+    console.log("updateApplicationStatus called with:", { applicationId, status, bidAmount , clientId });
 
     const validStatuses = ["accepted", "rejected", "negotiation"];
     if (!validStatuses.includes(status)) {
@@ -200,8 +201,10 @@ export const updateApplicationStatus = async (req, res) => {
     const application = await Application.findById(applicationId).populate("job");
     if (!application) return res.status(404).json({ message: "Application not found" });
 
-    if (application.job.clientId.toString() !== clientId) {
-      return res.status(403).json({ message: "Unauthorized" });
+    
+
+    if (application.job.clientId.toString() !== clientId.toString()) {
+      return res.status(403).json({ message: "Unauthorized " });
     }
 
     const jobId       = application.job._id;
@@ -315,7 +318,11 @@ export const getNegotiationHistory = async (req, res) => {
     const application = await Application.findById(applicationId).populate("job");
     if (!application) return res.status(404).json({ message: "Application not found" });
 
-    if (application.job.clientId.toString() !== clientId) {
+    console.log("DB:", application.job.clientId.toString());
+console.log("REQ:", clientId);
+console.log("EQUAL:", application.job.clientId.toString() === clientId);
+
+    if (application.job.clientId.toString() !== clientId.toString()) {
       return res.status(403).json({ message: "Unauthorized" });
     }
 
@@ -339,6 +346,7 @@ export const submitClientNegotiation = async (req, res) => {
     const { applicationId, proposedAmount, message } = req.body;
     const clientId = req.user.userId;
 
+
     if (!proposedAmount || isNaN(Number(proposedAmount))) {
       return res.status(400).json({ message: "Valid proposedAmount is required" });
     }
@@ -346,7 +354,7 @@ export const submitClientNegotiation = async (req, res) => {
     const application = await Application.findById(applicationId).populate("job");
     if (!application) return res.status(404).json({ message: "Application not found" });
 
-    if (application.job.clientId.toString() !== clientId) {
+    if (application.job.clientId.toString() !== clientId.toString()) {
       return res.status(403).json({ message: "Unauthorized" });
     }
 
@@ -641,7 +649,7 @@ export const negotiateApplication = async (req, res) => {
     await Negotiation.create({
       application:    applicationId,
       job:            application.job._id,
-      client:         null,
+      client:         application.job.clientId, 
       freelancer:     freelancerId,
       proposedAmount: Number(bidAmount),
       proposedBy:     "freelancer",

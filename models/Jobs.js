@@ -75,7 +75,7 @@ const jobSchema = new mongoose.Schema(
 
     visibility: {
       type:    String,
-      enum:    ["Public", "Private"],
+      enum:    ["Public", "invite-only"],
       default: "Public",
     },
 
