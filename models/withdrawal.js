@@ -31,6 +31,25 @@ const withdrawalSchema = new mongoose.Schema(
       type:    Date,
       default: null,
     },
+
+    // ✅ NEW: UPI details (when method = "upi")
+    upiId: {
+      type:    String,
+      default: null,
+    },
+
+    // ✅ NEW: Bank details (when method = "bank")
+    bankDetails: {
+      accountNumber: { type: String, default: null },
+      ifsc:          { type: String, default: null },
+      accountName:   { type: String, default: null },
+    },
+
+    // ✅ NEW: Platform fee deducted at withdrawal
+    platformFee: {
+      type:    Number,
+      default: 0,
+    },
   },
   { timestamps: true }
 );

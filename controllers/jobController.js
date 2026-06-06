@@ -324,6 +324,8 @@ export const trackJobView = async (req, res) => {
     const { jobId } = req.params;
     if (!userId) return res.status(401).json({ message: "Unauthorized" });
 
+    
+
     const job = await Job.findById(jobId);
     if (!job) return res.status(404).json({ message: "Job not found" });
 

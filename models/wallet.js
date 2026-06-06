@@ -10,8 +10,8 @@ const walletSchema = new mongoose.Schema(
       unique:   true,
     },
     role: {
-      type:    String,
-      enum:    ["client", "freelancer"],
+      type:     String,
+      enum:     ["client", "freelancer"],
       required: true,
     },
     balance: {
@@ -21,31 +21,41 @@ const walletSchema = new mongoose.Schema(
     },
     escrowHeld: {
       type:    Number,
-      default: 0, // client only — funds locked in escrow
+      default: 0,       // client only — funds locked in escrow
     },
     pendingRelease: {
       type:    Number,
-      default: 0, // freelancer only — earned but not yet released
+      default: 0,       // freelancer only — earned but not yet released
     },
     totalEarned: {
       type:    Number,
-      default: 0, // freelancer only
+      default: 0,       // freelancer only
     },
     totalSpent: {
       type:    Number,
-      default: 0, // client only
+      default: 0,       // client only
     },
     totalWithdrawn: {
       type:    Number,
-      default: 0, // freelancer only
+      default: 0,       // freelancer only
     },
     totalReleased: {
       type:    Number,
-      default: 0, // client only — total released to freelancers
+      default: 0,       // client only — total released to freelancers
     },
     platformFeesPaid: {
       type:    Number,
       default: 0,
+    },
+
+    // ✅ NEW: Wallet expiry (1 month from creation)
+    walletExpiryDate: {
+      type:    Date,
+      default: () => new Date(+new Date() + 30 * 24 * 60 * 60 * 1000),
+    },
+    isExpired: {
+      type:    Boolean,
+      default: false,
     },
   },
   { timestamps: true }

@@ -9,13 +9,13 @@ const transactionSchema = new mongoose.Schema(
       required: true,
     },
     role: {
-      type:    String,
-      enum:    ["client", "freelancer"],
+      type:     String,
+      enum:     ["client", "freelancer"],
       required: true,
     },
     type: {
-      type:    String,
-      enum:    [
+      type: String,
+      enum: [
         // Freelancer types
         "Milestone Payment",
         "Project Payment",
@@ -54,20 +54,31 @@ const transactionSchema = new mongoose.Schema(
     },
     isCredit: {
       type:    Boolean,
-      default: true, // true = money in, false = money out
+      default: true,   // true = money in, false = money out
     },
     status: {
-      type:    String,
-      enum:    [
-        "Paid", "Completed", "Deducted", "Refunded",  // freelancer
-        "Released", "Held", "Pending",                 // client
+      type: String,
+      enum: [
+        "Paid", "Completed", "Deducted", "Refunded",   // freelancer
+        "Released", "Held", "Pending",                  // client
       ],
       default: "Completed",
     },
+
     // For chart grouping
-    date:     { type: String, default: "" }, // "May 28, 2024"
-    time:     { type: String, default: "" }, // "11:30 AM"
-    dateValue: { type: Date, default: Date.now }, // for range queries
+    date:      { type: String, default: "" },      // "May 28, 2024"
+    time:      { type: String, default: "" },      // "11:30 AM"
+    dateValue: { type: Date,   default: Date.now },// for range queries
+
+    // ✅ NEW: Razorpay tracking
+    razorpayOrderId: {
+      type:    String,
+      default: null,
+    },
+    razorpayPaymentId: {
+      type:    String,
+      default: null,
+    },
   },
   { timestamps: true }
 );

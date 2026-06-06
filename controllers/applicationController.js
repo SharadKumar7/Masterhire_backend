@@ -318,9 +318,6 @@ export const getNegotiationHistory = async (req, res) => {
     const application = await Application.findById(applicationId).populate("job");
     if (!application) return res.status(404).json({ message: "Application not found" });
 
-    console.log("DB:", application.job.clientId.toString());
-console.log("REQ:", clientId);
-console.log("EQUAL:", application.job.clientId.toString() === clientId);
 
     if (application.job.clientId.toString() !== clientId.toString()) {
       return res.status(403).json({ message: "Unauthorized" });
@@ -600,6 +597,7 @@ export const getFreelancerApplication = async (req, res) => {
   try {
     const { jobId }    = req.params;
     const freelancerId = req.user.userId;
+    console.log("getFreelancerApplication called with:", { jobId, freelancerId });
 
     const application = await Application.findOne({
       job:  new mongoose.Types.ObjectId(jobId),
@@ -821,6 +819,29 @@ export const deleteFreelancerMessages = async (req, res) => {
     res.status(200).json({ success: true, message: "Messages deleted successfully" });
   } catch (error) {
     console.error("deleteFreelancerMessages error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+export const getFreelancerNegotiationHistory = async (req, res) => {
+  try {
+    const { applicationId } = req.params;
+    const freelancerId = req.user.userId;
+
+    const application = await Application.findById(applicationId);
+    if (!application) return res.status(404).json({ message: "Application not found" });
+
+    if (application.user.toString() !== freelancerId.toString()) {
+      return res.status(403).json({ message: "Unauthorized" });
+    }
+
+    const history = await Negotiation.find({ application: applicationId })
+      .sort({ createdAt: 1 })
+      .select("proposedAmount proposedBy message createdAt");
+
+    res.status(200).json({ history });
+  } catch (error) {
+    console.error("getFreelancerNegotiationHistory error:", error);
     res.status(500).json({ message: "Server error" });
   }
 };

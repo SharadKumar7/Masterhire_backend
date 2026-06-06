@@ -304,7 +304,7 @@ export const loginUser = async (req, res) => {
     res.json({
       message: "Login successful",
       token,
-      userId: user._id,
+      userId: user.userId, // FIX: user._id → userId (frontend ke liye consistency)
       role: user.role,
       fullName: `${user.firstName} ${user.lastName}`,
       isProfileComplete: user.isProfileComplete,

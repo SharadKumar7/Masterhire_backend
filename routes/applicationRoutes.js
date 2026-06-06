@@ -30,6 +30,7 @@ import {
   getFreelancerMessages,
   sendFreelancerMessage,
   deleteFreelancerMessages,
+  getFreelancerNegotiationHistory,
 } from "../controllers//applicationController.js";
 
 const router = express.Router();
@@ -53,5 +54,6 @@ router.patch("/freelancer/application/:applicationId/negotiate",    protect, neg
 router.get("/freelancer/messages/:jobId",                           protect, getFreelancerMessages);
 router.post("/freelancer/messages",                                 protect, upload.single("file"), sendFreelancerMessage);
 router.delete("/freelancer/messages/:jobId",                        protect, deleteFreelancerMessages);
+router.get("/freelancer/negotiation/:applicationId", protect, getFreelancerNegotiationHistory);
 
 export default router;

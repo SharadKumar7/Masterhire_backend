@@ -19,6 +19,9 @@ import clientWorkspaceRoute from "./routes/clientWorkspaceRoutes.js";
 import initSocket from "./socket/index.js";
 import transactionRoutes from "./routes/transactionRoutes.js";
 import projectHistoryRoutes from "./routes/projectHistoryRoutes.js";
+import paymentRoutes from "./routes/paymentRoutes.js";
+import startWalletExpiryCron from "./utils/walletExpiryCron.js";
+
 
 dotenv.config();
 
@@ -60,6 +63,8 @@ app.use("/api/client/settings",     clientAccountRoutes);
 app.use("/workspace/api",           clientWorkspaceRoute);
 app.use("/api",                     transactionRoutes);
 app.use("/api",                     projectHistoryRoutes);
+app.use("/api/payment", paymentRoutes);
+startWalletExpiryCron();
 
 
 app.get("/", (req, res) => res.send("API is running"));
