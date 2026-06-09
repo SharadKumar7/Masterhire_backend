@@ -1,4 +1,5 @@
 import User from "../models/User.js";
+import Wallet from "../models/wallet.js"; // ✅ NEW
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import nodemailer from "nodemailer";
@@ -35,11 +36,14 @@ export const getProfile = async (req, res) => {
       "-password -deleteOtp -deleteOtpExpiry -tokenVersion -otp -otpExpiry"
     );
 
+    // ✅ Wallet balance from Wallet model — single source of truth
+    const wallet = await Wallet.findOne({ user: req.user._id });
+    const walletBalance = wallet?.balance ?? 0;
+
     const data = {
       fullName:     `${user.firstName || ""} ${user.lastName || ""}`.trim(),
       email:        user.email,
       phone:        user.mobile || "",
-      // FIX: location now stored as full string to avoid city/state mismatch on save
       location:     user.address?.location || user.address?.city
                       ? (user.address.location || `${user.address.city || ""}${user.address.state ? ", " + user.address.state : ""}`.trim())
                       : "",
@@ -53,13 +57,16 @@ export const getProfile = async (req, res) => {
       communicationPreference: user.client?.communicationPreference || "",
       autoInviteFreelancers:   user.client?.autoInviteFreelancers ?? false,
       jobVisibility:           user.client?.jobVisibility || "Public",
-      walletBalance:           user.client?.walletBalance ?? 0,
-      paymentMethod:           user.client?.paymentMethod || "",
-      upi_id:                  user.client?.upi_id || "",
-      billingAddress:          user.client?.billingAddress || "",
-      paymentHistory:          user.client?.paymentHistory || [],
-      invoices:                user.client?.invoices || [],
-      notifications:           user.client?.notifications || {},
+
+      // ✅ walletBalance from Wallet model (not user.client.walletBalance)
+      walletBalance,
+
+      paymentMethod:  user.client?.paymentMethod || "",
+      upi_id:         user.client?.upi_id || "",
+      billingAddress: user.client?.billingAddress || "",
+      paymentHistory: user.client?.paymentHistory || [],
+      invoices:       user.client?.invoices || [],
+      notifications:  user.client?.notifications || {},
     };
 
     return res.status(200).json({ success: true, data });
@@ -96,7 +103,6 @@ export const updatePersonal = async (req, res) => {
       ...(bio          !== undefined && { bio }),
       ...(profilePhoto !== undefined && { photo: profilePhoto }),
       ...(companyName  !== undefined && { "client.companyName": companyName }),
-      // FIX: save location as a single string field to avoid city/state mismatch
       ...(location     !== undefined && { "address.location": location }),
     };
 
@@ -211,70 +217,10 @@ export const updateBillingAddress = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /add-funds
+// POST /add-funds — ✅ REMOVED (now handled by /api/payment/topup/*)
+// Frontend uses /api/payment/topup/create-order and /api/payment/topup/verify
+// This route is no longer needed
 // ─────────────────────────────────────────────────────────────────────────────
-export const addFunds = async (req, res) => {
-  try {
-    const { amount } = req.body;
-    if (!amount || Number(amount) <= 0)
-      return res.status(400).json({ success: false, message: "Invalid amount" });
-    if (Number(amount) < 100)
-      return res.status(400).json({ success: false, message: "Minimum amount is ₹100" });
-
-    /*
-      TODO: Payment Gateway Integration
-      Before incrementing walletBalance, verify payment with Razorpay/Stripe:
-
-      import Razorpay from "razorpay";
-      const razorpay = new Razorpay({
-        key_id: process.env.RAZORPAY_KEY_ID,
-        key_secret: process.env.RAZORPAY_KEY_SECRET,
-      });
-
-      Step 1 — Create order endpoint (POST /create-payment-order):
-        const order = await razorpay.orders.create({ amount: amount * 100, currency: "INR", receipt: `wallet_${Date.now()}` });
-        return res.json({ success: true, data: { order_id: order.id, key: process.env.RAZORPAY_KEY_ID, amount } });
-
-      Step 2 — Verify payment endpoint (POST /verify-payment):
-        const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
-        const expectedSig = crypto.createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-          .update(`${razorpay_order_id}|${razorpay_payment_id}`).digest("hex");
-        if (expectedSig !== razorpay_signature)
-          return res.status(400).json({ success: false, message: "Payment verification failed" });
-        // Then do the wallet update below ↓
-    */
-
-    const user = await User.findByIdAndUpdate(
-      req.user._id,
-      {
-        $inc:  { "client.walletBalance": Number(amount) },
-        $push: {
-          "client.paymentHistory": {
-            amount:      Number(amount),
-            date:        new Date(),
-            status:      "Success",
-            description: "Wallet top-up",
-          },
-        },
-      },
-      { new: true }
-    );
-
-    await createNotification({
-      userId:  req.user._id,
-      type:    "PAYMENT_RECEIVED",
-      title:   "Wallet Topped Up",
-      message: `₹${Number(amount).toLocaleString("en-IN")} has been added to your wallet. New balance: ₹${user.client.walletBalance.toLocaleString("en-IN")}.`,
-    });
-
-    return res.status(200).json({
-      success: true,
-      data: { walletBalance: user.client.walletBalance },
-    });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PATCH /notifications
@@ -329,7 +275,6 @@ export const changePassword = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /logout-all
-// FIX: tokenVersion increment karta hai — auth middleware mein check hona chahiye
 // ─────────────────────────────────────────────────────────────────────────────
 export const logoutAllDevices = async (req, res) => {
   try {
@@ -361,7 +306,6 @@ export const sendDeleteOTP = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DELETE /delete
-// FIX: tokenVersion bump on delete so existing tokens are invalidated immediately
 // ─────────────────────────────────────────────────────────────────────────────
 export const deleteAccount = async (req, res) => {
   try {
@@ -375,7 +319,6 @@ export const deleteAccount = async (req, res) => {
     if (new Date() > user.deleteOtpExpiry)
       return res.status(400).json({ success: false, message: "OTP has expired" });
 
-    // FIX: tokenVersion bump ensures all active JWTs are immediately rejected
     await User.findByIdAndUpdate(req.user._id, {
       $set: {
         isVerified:      false,
@@ -383,7 +326,7 @@ export const deleteAccount = async (req, res) => {
         deleteOtpExpiry: null,
         email:           `deleted_${req.user._id}@removed.com`,
       },
-      $inc: { tokenVersion: 1 }, // ← invalidates all active sessions immediately
+      $inc: { tokenVersion: 1 },
     });
 
     return res.status(200).json({ success: true, message: "Account deleted successfully" });
@@ -394,17 +337,6 @@ export const deleteAccount = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /invoices/:invoiceId/download
-// TODO: Replace plain-text fallback with PDF generation using pdfkit:
-//   import PDFDocument from "pdfkit";
-//   const doc = new PDFDocument();
-//   res.setHeader("Content-Type", "application/pdf");
-//   res.setHeader("Content-Disposition", `attachment; filename="invoice-${invoice.invoiceNumber}.pdf"`);
-//   doc.pipe(res);
-//   doc.fontSize(20).text(`Invoice #${invoice.invoiceNumber}`, { align: "center" });
-//   doc.moveDown().fontSize(12).text(`Amount: ₹${invoice.amount}`);
-//   doc.text(`Date: ${new Date(invoice.date).toLocaleDateString()}`);
-//   doc.text(`Status: ${invoice.status}`);
-//   doc.end();
 // ─────────────────────────────────────────────────────────────────────────────
 export const downloadInvoice = async (req, res) => {
   try {
@@ -415,7 +347,6 @@ export const downloadInvoice = async (req, res) => {
 
     if (invoice.fileUrl) return res.redirect(invoice.fileUrl);
 
-    // Plain text fallback — replace with pdfkit (see TODO above)
     res.setHeader("Content-Type", "text/plain");
     res.setHeader("Content-Disposition", `attachment; filename="invoice-${invoice.invoiceNumber}.txt"`);
     res.send(

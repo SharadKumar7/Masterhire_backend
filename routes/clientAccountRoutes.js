@@ -20,7 +20,6 @@ router.patch("/hiring-preferences", ctrl.updateHiringPreferences);
 router.patch("/upi",             ctrl.updateUPI);
 router.patch("/payment-method",  ctrl.updatePaymentMethod);
 router.patch("/billing-address", ctrl.updateBillingAddress);
-router.post("/add-funds",        ctrl.addFunds);
 router.get("/invoices/:invoiceId/download", ctrl.downloadInvoice);
 
 // Notifications

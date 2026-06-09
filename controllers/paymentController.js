@@ -52,7 +52,7 @@ export const createMilestoneOrder = async (req, res) => {
     const order = await razorpay.orders.create({
       amount:   amountInPaise,
       currency: "INR",
-      receipt:  `milestone_${milestoneId}`,
+      receipt:  `ms_${milestoneId.toString().slice(-12)}`,
       notes: {
         jobId:       jobId.toString(),
         milestoneId: milestoneId.toString(),
@@ -307,7 +307,7 @@ export const createTopupOrder = async (req, res) => {
     const order = await razorpay.orders.create({
       amount:   Math.round(amount * 100), // paise
       currency: "INR",
-      receipt:  `topup_${req.user._id}_${Date.now()}`,
+      receipt:  `tp_${req.user._id.toString().slice(-8)}_${Date.now().toString().slice(-8)}`,
       notes:    { userId: req.user._id.toString(), type: "wallet_topup" },
     });
 
