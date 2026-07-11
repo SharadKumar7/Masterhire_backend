@@ -1,5 +1,6 @@
 import Job from "../models/Jobs.js";
 import User from "../models/User.js";
+import HiredContract from "../models/HiredContract.js"; // 👈 NEW — source of the final/hired budget
 import { getFileType, formatFileSize } from "../middleware/upload.js";
 import { createNotification } from "./notificationController.js"; // ✅ ADD THIS
 
@@ -30,6 +31,21 @@ const getMilestoneSummary = (job) => {
     deadline: job.deadline || "N/A",
     duration: "N/A",
   };
+};
+
+// 👇 NEW — resolves the "final" budget from the HiredContract if one exists
+// for this client + freelancer + job title (same matching key used when the
+// contract is created in updateApplicationStatus). Falls back to job.budget
+// when the job hasn't been hired yet (no contract found).
+const resolveBudget = async (job, clientId, freelancerId) => {
+  if (!clientId || !freelancerId) return job.budget;
+  const contract = await HiredContract.findOne({
+    client:     clientId,
+    freelancer: freelancerId,
+    jobTitle:   job.title,
+  }).select("finalAmount");
+
+  return contract?.finalAmount ?? job.budget;
 };
 
 // ─── GET /workspace/api/job-details/:id  (CLIENT) ────────────────────────────
@@ -64,12 +80,15 @@ export const getJobDetails = async (req, res) => {
       };
     }
 
+    // 👇 NEW — replaces job.budget with the hired final amount, when present
+    const budget = await resolveBudget(job, job.clientId._id, job.assignedFreelancer?._id);
+
     return res.json({
       job: {
         _id:               job._id,
         title:             job.title,
         description:       job.description,
-        budget:            job.budget,
+        budget,                                    // 👈 same field name, resolved value
         deadline:          job.deadline,
         skills:            job.skills,
         status:            job.status,
@@ -114,12 +133,15 @@ export const getFreelancerJobDetails = async (req, res) => {
       rating:     c.client?.rating    || 0,
     };
 
+    // 👇 NEW — replaces job.budget with the hired final amount, when present
+    const budget = await resolveBudget(job, c._id, job.assignedFreelancer._id);
+
     return res.json({
       job: {
         _id:         job._id,
         title:       job.title,
         description: job.description,
-        budget:      job.budget,
+        budget,                                    // 👈 same field name, resolved value
         deadline:    job.deadline,
         skills:      job.skills,
         status:      job.status,
@@ -152,19 +174,17 @@ export const getFreelancerProfile = async (req, res) => {
 };
 
 // ─── POST /api/job/:id/milestones ─────────────────────────────────────────────
+// ✅ FIX: this used to check job.clientId (only client could add). Milestone
+// creation is now a FREELANCER action, so we check assignedFreelancer instead,
+// and the notification now goes to the client (they need to know a milestone
+// was proposed), not the freelancer.
 export const addMilestone = async (req, res) => {
   try {
-    console.log("=== ADD MILESTONE HIT ===");
-    console.log("jobId:", req.params.id);
-    console.log("userId:", req.user.userId);
-    console.log("body:", req.body);
-
     const job = await Job.findById(req.params.id);
-    console.log("job found:", !!job);
-    console.log("job clientId:", job?.clientId?.toString());
-
     if (!job) return res.status(404).json({ message: "Job not found" });
-    if (job.clientId.toString() !== req.user.userId?.toString()) {
+
+    // ✅ FIX: only the freelancer assigned to this job can add milestones now.
+    if (!job.assignedFreelancer || job.assignedFreelancer.toString() !== req.user.userId?.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
 
@@ -183,23 +203,22 @@ export const addMilestone = async (req, res) => {
     });
 
     job.activityLog.unshift({
-      label:   `Milestone "${title}" added`,
+      // ✅ FIX: wording now reflects that the freelancer proposed it
+      label:   `Milestone "${title}" proposed by freelancer`,
       meta:    `Due: ${new Date(dueDate).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })} · ₹${Number(budget).toLocaleString("en-IN")}`,
       primary: false,
     });
 
     await job.save();
 
-    // ✅ Freelancer ko — client ne naya milestone add kiya
-    if (job.assignedFreelancer) {
-      await createNotification({
-        userId:      job.assignedFreelancer,
-        type:        "JOB_APPLIED",
-        title:       "New Milestone Added",
-        message:     `Client added a new milestone "${title}" (₹${Number(budget).toLocaleString("en-IN")}) to "${job.title}".`,
-        referenceId: job._id,
-      });
-    }
+    // ✅ FIX: notify the CLIENT — freelancer added a new milestone, client should know
+    await createNotification({
+      userId:      job.clientId,
+      type:        "JOB_APPLIED",
+      title:       "New Milestone Proposed",
+      message:     `Freelancer added a new milestone "${title}" (₹${Number(budget).toLocaleString("en-IN")}) to "${job.title}".`,
+      referenceId: job._id,
+    });
 
     const added = job.milestones[job.milestones.length - 1];
     res.status(201).json({ message: "Milestone added", milestone: added });
@@ -234,7 +253,6 @@ export const updateMilestoneStatus = async (req, res) => {
         primary: true,
       });
 
-      // ✅ Freelancer ko — milestone approved
       if (job.assignedFreelancer) {
         await createNotification({
           userId:      job.assignedFreelancer,
@@ -253,7 +271,6 @@ export const updateMilestoneStatus = async (req, res) => {
         meta:  reviewNote || "Client requested revisions",
       });
 
-      // ✅ Freelancer ko — changes requested
       if (job.assignedFreelancer) {
         await createNotification({
           userId:      job.assignedFreelancer,
@@ -330,7 +347,6 @@ export const submitMilestone = async (req, res) => {
 
     await job.save();
 
-    // ✅ Client ko — freelancer ne milestone submit kiya
     await createNotification({
       userId:      job.clientId,
       type:        "JOB_APPLIED",
@@ -403,9 +419,7 @@ export const uploadJobFile = async (req, res) => {
 
     await job.save();
 
-    // ✅ Notify the OTHER party about file upload
     if (role === "client" && job.assignedFreelancer) {
-      // Client uploaded → notify freelancer
       await createNotification({
         userId:      job.assignedFreelancer,
         type:        "JOB_APPLIED",
@@ -414,7 +428,6 @@ export const uploadJobFile = async (req, res) => {
         referenceId: job._id,
       });
     } else if (role === "freelancer") {
-      // Freelancer uploaded → notify client
       await createNotification({
         userId:      job.clientId,
         type:        "JOB_APPLIED",

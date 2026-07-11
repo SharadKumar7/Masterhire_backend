@@ -5,7 +5,8 @@ import Application from "../models/applicationJob.js";
 import RecentlyViewedJob from "../models/recentlyViewJob.js";
 import mongoose from "mongoose";
 import { getKeywordsForCategory } from "../models/JobKeyMap.js";
-import { createNotification } from "./notificationController.js"; // ✅ ADD THIS
+import { createNotification } from "./notificationController.js";
+import HiredContract from "../models/HiredContract.js"; // ✅ ADD THIS
 
 export const searchJobs = async (req, res) => {
   try {
@@ -162,21 +163,36 @@ export const postJob = async (req, res) => {
   }
 };
 
+
+
 export const getFreelancerCurrentJobs = async (req, res) => {
   try {
     const jobs = await Job.find({ assignedFreelancer: req.user.userId });
-    const formattedJobs = jobs.map(job => ({
-      _id:             job._id,
-      jobId:           job.jobId,
-      title:           job.title,
-      description:     job.description,
-      skills:          job.skills,
-      budget:          job.budget,
-      deadline:        job.deadline,
-      proposal:        job.proposals || null,
-      paymentVerified: job.paymentVerified,
-      postedTime:      job.createdAt,
-    }));
+
+    // ✅ Sabhi related HiredContracts ek saath fetch kar lo (N+1 query avoid karne ke liye)
+    const contracts = await HiredContract.find({ freelancer: req.user.userId });
+
+    const formattedJobs = jobs.map(job => {
+      // ✅ Matching contract dhoondo (client + jobTitle se match)
+      const contract = contracts.find(
+        (c) => c.client.toString() === job.clientId.toString() && c.jobTitle === job.title
+      );
+
+      return {
+        _id:             job._id,
+        jobId:           job.jobId,
+        title:           job.title,
+        description:     job.description,
+        skills:          job.skills,
+        budget:          job.budget,                              // ✅ original — untouched
+        finalBudget:     contract ? contract.finalAmount : job.budget, // ✅ NEW — negotiated/locked amount
+        deadline:        job.deadline,
+        proposal:        job.proposals || null,
+        paymentVerified: job.paymentVerified,
+        postedTime:      job.createdAt,
+      };
+    });
+
     res.json({ success: true, count: formattedJobs.length, data: formattedJobs });
   } catch (error) {
     res.status(500).json({ success: false, message: "Error fetching current jobs" });
@@ -257,7 +273,10 @@ export const getAppliedJobs = async (req, res) => {
     const userId = req.user?.userId;
     if (!userId) return res.status(401).json({ message: "Unauthorized" });
 
-    const applications = await Application.find({ user: userId })
+    const applications = await Application.find({ 
+      user: userId, 
+      status: { $ne: "accepted" }   // ✅ accepted wale exclude — wo Current Jobs mein already hain
+    })
       .populate({ path: "job", select: "title description budget skills experienceLevel proposals postedTime jobId" })
       .sort({ createdAt: -1 });
 
@@ -266,6 +285,7 @@ export const getAppliedJobs = async (req, res) => {
       .map((a) => ({
         ...a.job.toObject(),
         isApplied: true,
+        status:    a.status,        // ✅ ye bhi add kar do — taaki frontend "rejected" tag dikha sake
         bidAmount: a.bidAmount,
         proposal:  a.proposal,
         appliedAt: a.createdAt,
@@ -277,6 +297,7 @@ export const getAppliedJobs = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
+
 
 export const toggleSaveJob = async (req, res) => {
   try {

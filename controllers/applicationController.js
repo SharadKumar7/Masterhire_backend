@@ -186,12 +186,19 @@ export const getClientJobApplications = async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // PATCH /api/client/:applicationId/status
 // ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// PATCH /api/client/:applicationId/status
+// Now usable by BOTH the client (owner of the job) and the freelancer
+// (owner of the application) — same route, same function, no duplication.
+// Freelancer is restricted to status: "accepted" only; reject/negotiate stay
+// client-only.
+// ═══════════════════════════════════════════════════════════════════════════════
 export const updateApplicationStatus = async (req, res) => {
   try {
     const { applicationId } = req.params;
     const { status, bidAmount } = req.body;
-    const clientId = req.user.userId;
-    console.log("updateApplicationStatus called with:", { applicationId, status, bidAmount , clientId });
+    const { userId, role } = req.user;   // 👈 role bhi lo, sirf clientId nahi
+    console.log("updateApplicationStatus called with:", { applicationId, status, bidAmount, userId, role });
 
     const validStatuses = ["accepted", "rejected", "negotiation"];
     if (!validStatuses.includes(status)) {
@@ -201,17 +208,25 @@ export const updateApplicationStatus = async (req, res) => {
     const application = await Application.findById(applicationId).populate("job");
     if (!application) return res.status(404).json({ message: "Application not found" });
 
-    
+    // ── Authorization: client (job owner) OR freelancer (applicant) ──────────
+    const isClient     = role === "client" && application.job.clientId.toString() === userId.toString();
+    const isFreelancer = role === "freelancer" && application.user.toString() === userId.toString();
 
-    if (application.job.clientId.toString() !== clientId.toString()) {
-      return res.status(403).json({ message: "Unauthorized " });
+    if (!isClient && !isFreelancer) {
+      return res.status(403).json({ message: "Unauthorized" });
     }
 
-    const jobId       = application.job._id;
-    const freelancerId = application.user;
-    const jobTitle    = application.job.title;
+    // Freelancer can only ACCEPT via this route — reject/negotiate stay client-only
+    if (isFreelancer && status !== "accepted") {
+      return res.status(403).json({ message: "Only the client can reject or negotiate an application" });
+    }
 
-    // ── ACCEPTED → Hire freelancer ───────────────────────────────────────────
+    const jobId        = application.job._id;
+    const freelancerId = application.user;
+    const clientId      = application.job.clientId;
+    const jobTitle      = application.job.title;
+
+    // ── ACCEPTED → Hire freelancer (either side can trigger it now) ──────────
     if (status === "accepted") {
       application.status = "accepted";
       await application.save();
@@ -229,21 +244,33 @@ export const updateApplicationStatus = async (req, res) => {
 
       await HiredContract.findOneAndUpdate(
         { client: clientId, freelancer: freelancerId, jobTitle },
-        { client: clientId, freelancer: freelancerId, jobTitle, status: "active" },
+        { client: clientId, freelancer: freelancerId, jobTitle, status: "active", finalAmount: application.bidAmount },
         { upsert: true, returnDocument: "after" }
       );
 
-      // ✅ Freelancer ko — hired notification
-      await createNotification({
-        userId:      freelancerId,
-        type:        "JOB_ASSIGNED",
-        title:       "🎉 You've been hired!",
-        message:     `Congratulations! You have been selected for "${jobTitle}".`,
-        referenceId: jobId,
-      });
+      // Notify whichever side did NOT trigger the accept
+      if (isFreelancer) {
+        // ✅ Client ko — freelancer ne accept kiya
+        await createNotification({
+          userId:      clientId,
+          type:        "JOB_ASSIGNED",
+          title:       "Freelancer Accepted Your Offer",
+          message:     `The freelancer accepted your offer for "${jobTitle}". The job is now assigned.`,
+          referenceId: jobId,
+        });
+      } else {
+        // ✅ Freelancer ko — client ne hire kiya (existing behavior, unchanged)
+        await createNotification({
+          userId:      freelancerId,
+          type:        "JOB_ASSIGNED",
+          title:       "🎉 You've been hired!",
+          message:     `Congratulations! You have been selected for "${jobTitle}".`,
+          referenceId: jobId,
+        });
+      }
 
       return res.status(200).json({
-        message: "Freelancer hired. Job assigned and other applications rejected.",
+        message: "Application accepted. Job assigned and other applications rejected.",
         application: {
           _id:       application._id,
           status:    application.status,
@@ -252,7 +279,7 @@ export const updateApplicationStatus = async (req, res) => {
       });
     }
 
-    // ── REJECTED ─────────────────────────────────────────────────────────────
+    // ── REJECTED — client only (unchanged) ────────────────────────────────────
     if (status === "rejected") {
       application.status = "rejected";
       await application.save();
@@ -276,7 +303,7 @@ export const updateApplicationStatus = async (req, res) => {
       });
     }
 
-    // ── NEGOTIATION ──────────────────────────────────────────────────────────
+    // ── NEGOTIATION — client only (unchanged) ─────────────────────────────────
     application.status = status;
     if (status === "negotiation" && bidAmount) {
       application.bidAmount = bidAmount;
@@ -305,7 +332,6 @@ export const updateApplicationStatus = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
-
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // GET /api/client/negotiation/:applicationId
@@ -343,7 +369,6 @@ export const submitClientNegotiation = async (req, res) => {
     const { applicationId, proposedAmount, message } = req.body;
     const clientId = req.user.userId;
 
-
     if (!proposedAmount || isNaN(Number(proposedAmount))) {
       return res.status(400).json({ message: "Valid proposedAmount is required" });
     }
@@ -365,7 +390,8 @@ export const submitClientNegotiation = async (req, res) => {
       message:        message || "",
     });
 
-    application.status = "negotiation";
+    application.status    = "negotiation";
+    application.bidAmount = Number(proposedAmount);   // ✅ NEW — bidAmount ko sync karo
     await application.save();
 
     // ✅ Freelancer ko — client ne counter offer bheja
