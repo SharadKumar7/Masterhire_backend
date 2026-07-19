@@ -6,7 +6,23 @@ import Wallet          from "../models/wallet.js";
 import Transaction     from "../models/Transaction.js";
 import Withdrawal      from "../models/withdrawal.js";
 
-const PLATFORM_FEE_PERCENT = 10; // 10%
+// ✅ FIX: was 10 — now matches the 5% shown on both the freelancer and client
+// milestone UI. This is deducted from what the freelancer receives.
+const PLATFORM_FEE_PERCENT = 5;
+
+// ✅ NEW — the client pays an additional platform fee + GST on top of the
+// milestone amount. This is separate from the freelancer-side deduction above.
+const GST_PERCENT = 18;
+
+// ✅ NEW — computes what the client actually pays for a milestone:
+// milestone amount + platform fee (5%) + GST (18% of that fee).
+// e.g. amount=200 → platformFee=10, gstOnFee=1.8, totalPayable=211.8
+const getClientCharge = (amount) => {
+  const platformFee = Math.round((amount * PLATFORM_FEE_PERCENT) / 100);
+  const gstOnFee     = Math.round((platformFee * GST_PERCENT) / 100);
+  const totalPayable = amount + platformFee + gstOnFee;
+  return { platformFee, gstOnFee, totalPayable };
+};
 
 // ─── Helper: format date/time for Transaction ────────────────────────────────
 const formatDateTime = () => {
@@ -34,7 +50,6 @@ export const createMilestoneOrder = async (req, res) => {
     const { jobId, milestoneId } = req.body;
     const clientId = req.user._id;
 
-    // Find job & milestone
     const job = await Job.findById(jobId);
     if (!job) return res.status(404).json({ message: "Job not found" });
 
@@ -45,10 +60,10 @@ export const createMilestoneOrder = async (req, res) => {
       return res.status(400).json({ message: "Milestone already paid" });
     }
 
-    // Amount in paise (Razorpay uses paise)
-    const amountInPaise = Math.round(milestone.budget * 100);
+    // ✅ FIX: charge amount + platform fee + GST, not just the raw milestone amount
+    const { platformFee, gstOnFee, totalPayable } = getClientCharge(milestone.budget);
+    const amountInPaise = Math.round(totalPayable * 100);
 
-    // Create Razorpay order
     const order = await razorpay.orders.create({
       amount:   amountInPaise,
       currency: "INR",
@@ -60,8 +75,12 @@ export const createMilestoneOrder = async (req, res) => {
       },
     });
 
-    // Save orderId to milestone
-    milestone.razorpayOrderId = order.id;
+    // ✅ Store the breakdown on the milestone so later steps (verify, approve,
+    // refund) never have to recompute it — same numbers throughout the flow.
+    milestone.razorpayOrderId   = order.id;
+    milestone.clientPlatformFee = platformFee;
+    milestone.clientGST          = gstOnFee;
+    milestone.clientTotalPaid    = totalPayable;
     await job.save();
 
     res.status(200).json({
@@ -70,6 +89,13 @@ export const createMilestoneOrder = async (req, res) => {
       amount:   amountInPaise,
       currency: "INR",
       key:      process.env.RAZORPAY_KEY_ID,
+      // ✅ NEW — frontend should render this instead of recalculating locally
+      breakdown: {
+        milestoneAmount: milestone.budget,
+        platformFee,
+        gstOnFee,
+        totalPayable,
+      },
     });
   } catch (err) {
     console.error("createMilestoneOrder error:", err);
@@ -94,8 +120,8 @@ export const verifyMilestonePayment = async (req, res) => {
     const clientId = req.user._id;
 
     // ── Verify signature ──────────────────────────────────────────────────────
-    const body      = razorpay_order_id + "|" + razorpay_payment_id;
-    const expected  = crypto
+    const body     = razorpay_order_id + "|" + razorpay_payment_id;
+    const expected = crypto
       .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
       .update(body)
       .digest("hex");
@@ -111,7 +137,9 @@ export const verifyMilestonePayment = async (req, res) => {
     const milestone = job.milestones.id(milestoneId);
     if (!milestone) return res.status(404).json({ message: "Milestone not found" });
 
-    const amount = milestone.budget;
+    // ✅ FIX: use the stored total (fee + GST inclusive) set at order-creation —
+    // not just milestone.budget
+    const totalPayable = milestone.clientTotalPaid || milestone.budget;
 
     // ── Update milestone ──────────────────────────────────────────────────────
     milestone.razorpayOrderId   = razorpay_order_id;
@@ -122,7 +150,7 @@ export const verifyMilestonePayment = async (req, res) => {
     // ── Activity log ──────────────────────────────────────────────────────────
     job.activityLog.push({
       label:   `Payment held in escrow for milestone: ${milestone.title}`,
-      meta:    `₹${amount}`,
+      meta:    `₹${totalPayable.toLocaleString("en-IN")} (incl. fee + GST)`,
       primary: true,
     });
 
@@ -130,8 +158,8 @@ export const verifyMilestonePayment = async (req, res) => {
 
     // ── Update client wallet ──────────────────────────────────────────────────
     const clientWallet = await getOrCreateWallet(clientId, "client");
-    clientWallet.escrowHeld += amount;
-    clientWallet.totalSpent += amount;
+    clientWallet.escrowHeld += totalPayable; // ✅ FIX: full charged amount held
+    clientWallet.totalSpent += totalPayable;
     await clientWallet.save();
 
     // ── Log client transaction ────────────────────────────────────────────────
@@ -144,7 +172,7 @@ export const verifyMilestonePayment = async (req, res) => {
       description:       `Escrow held for milestone: ${milestone.title}`,
       project:           job.title,
       jobId:             job._id,
-      amount,
+      amount:            totalPayable, // ✅ FIX
       isCredit:          false,
       status:            "Held",
       date,
@@ -190,22 +218,27 @@ export const approveMilestone = async (req, res) => {
 
     const freelancerId = job.assignedFreelancer._id;
     const grossAmount  = milestone.budget;
+    const totalHeld     = milestone.clientTotalPaid || grossAmount; // ✅ what was actually taken from client
 
-    // ── Calculate platform fee ────────────────────────────────────────────────
-    const platformFee    = Math.round((grossAmount * PLATFORM_FEE_PERCENT) / 100);
-    const freelancerGets = grossAmount - platformFee;
+    // ✅ FIX: freelancer-side fee now 5% (via PLATFORM_FEE_PERCENT fix above)
+    const freelancerFee  = Math.round((grossAmount * PLATFORM_FEE_PERCENT) / 100);
+    const freelancerGets = grossAmount - freelancerFee;
+
+    // Platform's total revenue on this milestone = freelancer-side fee +
+    // client-side fee + GST on that client-side fee
+    const platformRevenue = freelancerFee + (milestone.clientPlatformFee || 0) + (milestone.clientGST || 0);
 
     // ── Update milestone ──────────────────────────────────────────────────────
-    milestone.status        = "approved";
-    milestone.isPaid        = true;
-    milestone.paidAt        = new Date();
-    milestone.paidAmount    = freelancerGets;
-    milestone.escrowStatus  = "released";
+    milestone.status       = "approved";
+    milestone.isPaid       = true;
+    milestone.paidAt       = new Date();
+    milestone.paidAmount   = freelancerGets;
+    milestone.escrowStatus = "released";
 
     // ── Activity log ──────────────────────────────────────────────────────────
     job.activityLog.push({
       label:   `Milestone approved & payment released: ${milestone.title}`,
-      meta:    `₹${freelancerGets} to freelancer (₹${platformFee} platform fee)`,
+      meta:    `₹${freelancerGets.toLocaleString("en-IN")} to freelancer (₹${freelancerFee.toLocaleString("en-IN")} platform fee)`,
       primary: true,
     });
 
@@ -213,9 +246,9 @@ export const approveMilestone = async (req, res) => {
 
     // ── Update client wallet ──────────────────────────────────────────────────
     const clientWallet = await getOrCreateWallet(clientId, "client");
-    clientWallet.escrowHeld   = Math.max(0, clientWallet.escrowHeld - grossAmount);
-    clientWallet.totalReleased += grossAmount;
-    clientWallet.platformFeesPaid += platformFee;
+    clientWallet.escrowHeld       = Math.max(0, clientWallet.escrowHeld - totalHeld); // ✅ FIX
+    clientWallet.totalReleased   += totalHeld;
+    clientWallet.platformFeesPaid += (milestone.clientPlatformFee || 0) + (milestone.clientGST || 0);
     await clientWallet.save();
 
     // ── Update freelancer wallet ──────────────────────────────────────────────
@@ -226,7 +259,7 @@ export const approveMilestone = async (req, res) => {
     freelancerWallet.isExpired        = false;
     freelancerWallet.balance         += freelancerGets;
     freelancerWallet.totalEarned     += freelancerGets;
-    freelancerWallet.platformFeesPaid += platformFee;
+    freelancerWallet.platformFeesPaid += freelancerFee;
     await freelancerWallet.save();
 
     // ── Log transactions ──────────────────────────────────────────────────────
@@ -241,7 +274,7 @@ export const approveMilestone = async (req, res) => {
       description: `Released payment for: ${milestone.title}`,
       project:     job.title,
       jobId:       job._id,
-      amount:      grossAmount,
+      amount:      totalHeld, // ✅ FIX: reflects what client actually paid (incl. fee+GST)
       isCredit:    false,
       status:      "Released",
       date, time, dateValue,
@@ -272,20 +305,23 @@ export const approveMilestone = async (req, res) => {
       role:        "freelancer",
       type:        "Platform Fee",
       typeIcon:    "arrowUp",
-      description: `Platform fee (10%) for: ${milestone.title}`,
+      description: `Platform fee (${PLATFORM_FEE_PERCENT}%) for: ${milestone.title}`, // ✅ FIX: dynamic
       project:     job.title,
       jobId:       job._id,
-      amount:      platformFee,
+      amount:      freelancerFee,
       isCredit:    false,
       status:      "Deducted",
       date, time, dateValue,
     });
 
     res.status(200).json({
-      success:      true,
-      message:      "Milestone approved. Payment released to freelancer.",
+      success:            true,
+      message:            "Milestone approved successfully. Payment released to the freelancer.",
       freelancerGets,
-      platformFee,
+      freelancerFee,
+      clientPlatformFee:  milestone.clientPlatformFee,
+      clientGST:           milestone.clientGST,
+      platformRevenue,
     });
   } catch (err) {
     console.error("approveMilestone error:", err);
@@ -352,8 +388,8 @@ export const verifyTopup = async (req, res) => {
 
     // ── Update client wallet ──────────────────────────────────────────────────
     const wallet = await getOrCreateWallet(userId, "client");
-    wallet.balance      += Number(amount);
-    wallet.totalSpent   += Number(amount);
+    wallet.balance    += Number(amount);
+    wallet.totalSpent += Number(amount);
 
     // Reset expiry on top-up
     wallet.walletExpiryDate = new Date(+new Date() + 30 * 24 * 60 * 60 * 1000);
@@ -407,28 +443,32 @@ export const payMilestoneFromWallet = async (req, res) => {
       return res.status(400).json({ message: "Milestone already paid" });
     }
 
-    const amount = milestone.budget;
+    // ✅ FIX: total payable includes platform fee + GST
+    const { platformFee, gstOnFee, totalPayable } = getClientCharge(milestone.budget);
 
     // ── Check wallet balance ──────────────────────────────────────────────────
     const clientWallet = await getOrCreateWallet(clientId, "client");
-    if (clientWallet.balance < amount) {
+    if (clientWallet.balance < totalPayable) {
       return res.status(400).json({
-        message: `Insufficient wallet balance. Need ₹${amount}, have ₹${clientWallet.balance}`,
+        message: `Insufficient wallet balance. Need ₹${totalPayable.toLocaleString("en-IN")}, have ₹${clientWallet.balance.toLocaleString("en-IN")}`,
       });
     }
 
     // ── Deduct from wallet, move to escrow ───────────────────────────────────
-    clientWallet.balance    -= amount;
-    clientWallet.escrowHeld += amount;
-    clientWallet.totalSpent += amount;
+    clientWallet.balance    -= totalPayable;
+    clientWallet.escrowHeld += totalPayable;
+    clientWallet.totalSpent += totalPayable;
     await clientWallet.save();
 
     // ── Update milestone ──────────────────────────────────────────────────────
-    milestone.escrowStatus = "held";
+    milestone.escrowStatus      = "held";
+    milestone.clientPlatformFee = platformFee;
+    milestone.clientGST          = gstOnFee;
+    milestone.clientTotalPaid    = totalPayable;
 
     job.activityLog.push({
       label:   `Wallet payment held in escrow: ${milestone.title}`,
-      meta:    `₹${amount}`,
+      meta:    `₹${totalPayable.toLocaleString("en-IN")} (incl. fee + GST)`,
       primary: true,
     });
 
@@ -444,7 +484,7 @@ export const payMilestoneFromWallet = async (req, res) => {
       description: `Wallet payment — escrow held for: ${milestone.title}`,
       project:     job.title,
       jobId:       job._id,
-      amount,
+      amount:      totalPayable, // ✅ FIX
       isCredit:    false,
       status:      "Held",
       date, time, dateValue,
@@ -548,7 +588,8 @@ export const cancelProject = async (req, res) => {
     // ── Refund all milestones that are "held" but not yet approved ─────────────
     for (const milestone of job.milestones) {
       if (milestone.escrowStatus === "held" && !milestone.isPaid) {
-        totalRefund += milestone.budget;
+        const refundAmount = milestone.clientTotalPaid || milestone.budget; // ✅ FIX
+        totalRefund += refundAmount;
         milestone.escrowStatus = "refunded";
 
         await Transaction.create({
@@ -559,7 +600,7 @@ export const cancelProject = async (req, res) => {
           description: `Refund for cancelled milestone: ${milestone.title}`,
           project:     job.title,
           jobId:       job._id,
-          amount:      milestone.budget,
+          amount:      refundAmount, // ✅ FIX
           isCredit:    true,
           status:      "Refunded",
           date, time, dateValue,

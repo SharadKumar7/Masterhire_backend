@@ -7,6 +7,8 @@ import {
   getFreelancerJobDetails,
   getFreelancerProfile,
   addMilestone,
+  editMilestone,      // ✅ NEW
+  deleteMilestone,    // ✅ NEW
   updateMilestoneStatus,
   submitMilestone,
   getJobFiles,
@@ -34,6 +36,8 @@ router.get("/freelancer/:id/profile",                   protect, getFreelancerPr
 
 // Milestones
 router.post  ("/job/:id/milestones",                    protect, addMilestone);
+router.patch ("/job/:jobId/milestones/:milestoneId",    protect, editMilestone);    // ✅ NEW — freelancer edits before approval
+router.delete("/job/:jobId/milestones/:milestoneId",    protect, deleteMilestone);  // ✅ NEW — freelancer deletes before approval
 router.patch ("/milestones/:jobId/:milestoneId/status", protect, updateMilestoneStatus);
 router.post  ("/milestones/:jobId/:milestoneId/submit", protect, upload.array("files", 10), submitMilestone);
 

@@ -1,8 +1,8 @@
 import Job from "../models/Jobs.js";
 import User from "../models/User.js";
-import HiredContract from "../models/HiredContract.js"; // 👈 NEW — source of the final/hired budget
+import HiredContract from "../models/HiredContract.js";
 import { getFileType, formatFileSize } from "../middleware/upload.js";
-import { createNotification } from "./notificationController.js"; // ✅ ADD THIS
+import { createNotification } from "./notificationController.js";
 
 // ─── Helper: ensure arrays exist on old jobs ──────────────────────────────────
 const ensureArrays = (job) => {
@@ -11,19 +11,41 @@ const ensureArrays = (job) => {
   if (!job.files)       job.files       = [];
 };
 
+// ─── Helper: resolve the real contract ceiling ────────────────────────────────
+// ✅ FIX: now reads the directly-linked HiredContract (job.hiredContract),
+// not a fragile client+freelancer+jobTitle lookup that could match the wrong
+// contract if the same client hired the same freelancer more than once.
+// Requires the caller to have populated "hiredContract" with "finalAmount".
+const resolveBudget = (job) => {
+  return job.hiredContract?.finalAmount ?? job.budget;
+};
+
 // ─── Helper: milestone summary ────────────────────────────────────────────────
-const getMilestoneSummary = (job) => {
-  const milestones      = job.milestones || [];
-  const totalBudget     = milestones.reduce((s, m) => s + (m.budget || 0), 0);
-  const totalPaid       = milestones.filter(m => m.isPaid).reduce((s, m) => s + (m.paidAmount || 0), 0);
-  const approvedCount   = milestones.filter(m => m.status === "approved").length;
+// ✅ FIX: totalBudget now comes from the resolved contract amount instead of
+// summing milestone budgets (which made the cap unenforceable — it could
+// never be "exceeded" since it was calculated from itself). totalAllocated /
+// remainingToAllocate are new — used to validate new/edited milestones.
+const getMilestoneSummary = (job, contractBudget) => {
+  const milestones = job.milestones || [];
+
+  // rejected milestones don't count against the allocation cap
+  const activeMilestones = milestones.filter((m) => m.status !== "rejected");
+
+  const totalAllocated  = activeMilestones.reduce((s, m) => s + (m.budget || 0), 0);
+  const totalPaidGross  = milestones.filter((m) => m.isPaid).reduce((s, m) => s + (m.budget || 0), 0);
+  const totalPaidNet    = milestones.filter((m) => m.isPaid).reduce((s, m) => s + (m.paidAmount || 0), 0);
+  const approvedCount   = milestones.filter((m) => m.status === "approved").length;
   const overallProgress = milestones.length
     ? Math.round((approvedCount / milestones.length) * 100)
     : 0;
+
   return {
-    totalBudget,
-    totalPaid,
-    totalRemaining:  totalBudget - totalPaid,
+    totalBudget:          contractBudget,
+    totalAllocated,
+    remainingToAllocate:  contractBudget - totalAllocated,
+    totalPaid:            totalPaidGross,
+    totalPaidNet,
+    totalRemaining:       contractBudget - totalPaidGross,
     overallProgress,
     startedOn: job.startedAt
       ? new Date(job.startedAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })
@@ -33,27 +55,13 @@ const getMilestoneSummary = (job) => {
   };
 };
 
-// 👇 NEW — resolves the "final" budget from the HiredContract if one exists
-// for this client + freelancer + job title (same matching key used when the
-// contract is created in updateApplicationStatus). Falls back to job.budget
-// when the job hasn't been hired yet (no contract found).
-const resolveBudget = async (job, clientId, freelancerId) => {
-  if (!clientId || !freelancerId) return job.budget;
-  const contract = await HiredContract.findOne({
-    client:     clientId,
-    freelancer: freelancerId,
-    jobTitle:   job.title,
-  }).select("finalAmount");
-
-  return contract?.finalAmount ?? job.budget;
-};
-
 // ─── GET /workspace/api/job-details/:id  (CLIENT) ────────────────────────────
 export const getJobDetails = async (req, res) => {
   try {
     const job = await Job.findById(req.params.id)
       .populate({ path: "assignedFreelancer", select: "firstName lastName photo title skills freelancer" })
-      .populate("clientId", "firstName lastName photo");
+      .populate("clientId", "firstName lastName photo")
+      .populate("hiredContract", "finalAmount"); // ✅ NEW
 
     if (!job) return res.status(404).json({ message: "Job not found" });
 
@@ -80,15 +88,14 @@ export const getJobDetails = async (req, res) => {
       };
     }
 
-    // 👇 NEW — replaces job.budget with the hired final amount, when present
-    const budget = await resolveBudget(job, job.clientId._id, job.assignedFreelancer?._id);
+    const budget = resolveBudget(job); // ✅ FIX: sync now, uses populated hiredContract
 
     return res.json({
       job: {
         _id:               job._id,
         title:             job.title,
         description:       job.description,
-        budget,                                    // 👈 same field name, resolved value
+        budget,
         deadline:          job.deadline,
         skills:            job.skills,
         status:            job.status,
@@ -96,7 +103,7 @@ export const getJobDetails = async (req, res) => {
         milestones:        job.milestones,
         files:             job.files,
         activityLog:       job.activityLog,
-        summary:           getMilestoneSummary(job),
+        summary:           getMilestoneSummary(job, budget), // ✅ FIX: pass resolved budget
       },
     });
   } catch (err) {
@@ -110,7 +117,8 @@ export const getFreelancerJobDetails = async (req, res) => {
   try {
     const job = await Job.findById(req.params.id)
       .populate({ path: "assignedFreelancer", select: "firstName lastName photo title skills freelancer" })
-      .populate("clientId", "firstName lastName photo title client");
+      .populate("clientId", "firstName lastName photo title client")
+      .populate("hiredContract", "finalAmount"); // ✅ NEW
 
     if (!job) return res.status(404).json({ message: "Job not found" });
 
@@ -119,7 +127,6 @@ export const getFreelancerJobDetails = async (req, res) => {
     }
 
     ensureArrays(job);
-    console.log("Job's clientId:", job.clientId);
 
     const c = job.clientId;
     const client = {
@@ -133,15 +140,14 @@ export const getFreelancerJobDetails = async (req, res) => {
       rating:     c.client?.rating    || 0,
     };
 
-    // 👇 NEW — replaces job.budget with the hired final amount, when present
-    const budget = await resolveBudget(job, c._id, job.assignedFreelancer._id);
+    const budget = resolveBudget(job); // ✅ FIX
 
     return res.json({
       job: {
         _id:         job._id,
         title:       job.title,
         description: job.description,
-        budget,                                    // 👈 same field name, resolved value
+        budget,
         deadline:    job.deadline,
         skills:      job.skills,
         status:      job.status,
@@ -149,7 +155,7 @@ export const getFreelancerJobDetails = async (req, res) => {
         milestones:  job.milestones,
         files:       job.files,
         activityLog: job.activityLog,
-        summary:     getMilestoneSummary(job),
+        summary:     getMilestoneSummary(job, budget), // ✅ FIX
       },
     });
   } catch (err) {
@@ -174,16 +180,14 @@ export const getFreelancerProfile = async (req, res) => {
 };
 
 // ─── POST /api/job/:id/milestones ─────────────────────────────────────────────
-// ✅ FIX: this used to check job.clientId (only client could add). Milestone
-// creation is now a FREELANCER action, so we check assignedFreelancer instead,
-// and the notification now goes to the client (they need to know a milestone
-// was proposed), not the freelancer.
+// Freelancer proposes a milestone. Requires client approval (status
+// "pending_approval") before work can be submitted, and is capped so the sum
+// of active milestone budgets never exceeds the hired contract amount.
 export const addMilestone = async (req, res) => {
   try {
-    const job = await Job.findById(req.params.id);
+    const job = await Job.findById(req.params.id).populate("hiredContract", "finalAmount");
     if (!job) return res.status(404).json({ message: "Job not found" });
 
-    // ✅ FIX: only the freelancer assigned to this job can add milestones now.
     if (!job.assignedFreelancer || job.assignedFreelancer.toString() !== req.user.userId?.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
@@ -191,32 +195,48 @@ export const addMilestone = async (req, res) => {
     ensureArrays(job);
 
     const { title, description, budget, duration, dueDate, deliverables } = req.body;
+    const milestoneBudget = Number(budget);
+
+    if (!milestoneBudget || milestoneBudget <= 0) {
+      return res.status(400).json({ message: "Milestone budget must be greater than 0" });
+    }
+
+    // ✅ Budget cap enforcement — the source of truth is the hired contract
+    const contractBudget = resolveBudget(job);
+    const totalAllocated = job.milestones
+      .filter((m) => m.status !== "rejected")
+      .reduce((s, m) => s + (m.budget || 0), 0);
+
+    if (totalAllocated + milestoneBudget > contractBudget) {
+      const remaining = contractBudget - totalAllocated;
+      return res.status(400).json({
+        message: `Milestone budget exceeds remaining contract amount. Remaining budget: ₹${remaining.toLocaleString("en-IN")}`,
+      });
+    }
 
     job.milestones.push({
       title,
       description,
-      budget:       Number(budget),
+      budget:       milestoneBudget,
       duration,
       dueDate:      new Date(dueDate),
       deliverables,
-      status:       "pending",
+      status:       "pending_approval", // ✅ FIX: was "pending" — waits for client approval
     });
 
     job.activityLog.unshift({
-      // ✅ FIX: wording now reflects that the freelancer proposed it
       label:   `Milestone "${title}" proposed by freelancer`,
-      meta:    `Due: ${new Date(dueDate).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })} · ₹${Number(budget).toLocaleString("en-IN")}`,
+      meta:    `Due: ${new Date(dueDate).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })} · ₹${milestoneBudget.toLocaleString("en-IN")}`,
       primary: false,
     });
 
     await job.save();
 
-    // ✅ FIX: notify the CLIENT — freelancer added a new milestone, client should know
     await createNotification({
       userId:      job.clientId,
       type:        "JOB_APPLIED",
       title:       "New Milestone Proposed",
-      message:     `Freelancer added a new milestone "${title}" (₹${Number(budget).toLocaleString("en-IN")}) to "${job.title}".`,
+      message:     `Freelancer added a new milestone "${title}" (₹${milestoneBudget.toLocaleString("en-IN")}) to "${job.title}". Please review and approve.`,
       referenceId: job._id,
     });
 
@@ -227,7 +247,98 @@ export const addMilestone = async (req, res) => {
   }
 };
 
+// ─── PATCH /api/job/:jobId/milestones/:milestoneId ────────────────────────────
+// ✅ NEW — freelancer edits a milestone. Only allowed while status is
+// "pending_approval" (before the client has approved it).
+export const editMilestone = async (req, res) => {
+  try {
+    const { jobId, milestoneId } = req.params;
+    const job = await Job.findById(jobId).populate("hiredContract", "finalAmount");
+    if (!job) return res.status(404).json({ message: "Job not found" });
+
+    if (!job.assignedFreelancer || job.assignedFreelancer.toString() !== req.user.userId?.toString()) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    const ms = job.milestones.id(milestoneId);
+    if (!ms) return res.status(404).json({ message: "Milestone not found" });
+
+    if (ms.status !== "pending_approval") {
+      return res.status(400).json({ message: "Cannot edit a milestone after it has been approved" });
+    }
+
+    const { title, description, budget, duration, dueDate, deliverables } = req.body;
+    const newBudget = Number(budget);
+
+    if (!newBudget || newBudget <= 0) {
+      return res.status(400).json({ message: "Milestone budget must be greater than 0" });
+    }
+
+    // Re-validate the cap, excluding this milestone's OLD amount from the sum
+    const contractBudget = resolveBudget(job);
+    const totalOthers = job.milestones
+      .filter((m) => m.status !== "rejected" && m._id.toString() !== milestoneId)
+      .reduce((s, m) => s + (m.budget || 0), 0);
+
+    if (totalOthers + newBudget > contractBudget) {
+      const remaining = contractBudget - totalOthers;
+      return res.status(400).json({
+        message: `Milestone budget exceeds remaining contract amount. Remaining budget: ₹${remaining.toLocaleString("en-IN")}`,
+      });
+    }
+
+    ms.title        = title;
+    ms.description  = description;
+    ms.budget        = newBudget;
+    ms.duration      = duration;
+    ms.dueDate       = new Date(dueDate);
+    ms.deliverables  = deliverables;
+
+    job.activityLog.unshift({
+      label: `Milestone "${title}" edited by freelancer`,
+      meta:  `₹${newBudget.toLocaleString("en-IN")}`,
+    });
+
+    await job.save();
+    res.json({ message: "Milestone updated", milestone: ms });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ─── DELETE /api/job/:jobId/milestones/:milestoneId ───────────────────────────
+// ✅ NEW — freelancer deletes a milestone. Only allowed before client approval.
+export const deleteMilestone = async (req, res) => {
+  try {
+    const { jobId, milestoneId } = req.params;
+    const job = await Job.findById(jobId);
+    if (!job) return res.status(404).json({ message: "Job not found" });
+
+    if (!job.assignedFreelancer || job.assignedFreelancer.toString() !== req.user.userId?.toString()) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    const ms = job.milestones.id(milestoneId);
+    if (!ms) return res.status(404).json({ message: "Milestone not found" });
+
+    if (ms.status !== "pending_approval") {
+      return res.status(400).json({ message: "Cannot delete a milestone after it has been approved" });
+    }
+
+    ms.deleteOne();
+    job.activityLog.unshift({ label: "Milestone deleted by freelancer", meta: "" });
+
+    await job.save();
+    res.json({ message: "Milestone deleted" });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 // ─── PATCH /api/milestones/:jobId/:milestoneId/status ────────────────────────
+// Client-only. Two distinct stages:
+//  - approve_milestone / reject_milestone  → the PROPOSAL (before work starts)
+//  - approve / request_changes             → the SUBMITTED WORK
 export const updateMilestoneStatus = async (req, res) => {
   try {
     const { jobId, milestoneId } = req.params;
@@ -244,7 +355,55 @@ export const updateMilestoneStatus = async (req, res) => {
     const ms = job.milestones.id(milestoneId);
     if (!ms) return res.status(404).json({ message: "Milestone not found" });
 
-    if (action === "approve") {
+    // ✅ NEW — client approves the milestone PROPOSAL, freelancer can now start work
+    if (action === "approve_milestone") {
+      if (ms.status !== "pending_approval") {
+        return res.status(400).json({ message: "Only milestones pending approval can be approved" });
+      }
+      ms.status = "in progress";
+      job.activityLog.unshift({
+        label:   `Milestone "${ms.title}" approved by client`,
+        meta:    "Freelancer can now start work",
+        primary: false,
+      });
+
+      if (job.assignedFreelancer) {
+        await createNotification({
+          userId:      job.assignedFreelancer,
+          type:        "JOB_APPLIED",
+          title:       "Milestone Approved",
+          message:     `Client approved your milestone "${ms.title}" for "${job.title}". You can start work now.`,
+          referenceId: job._id,
+        });
+      }
+
+    // ✅ NEW — client rejects the milestone PROPOSAL
+    } else if (action === "reject_milestone") {
+      if (ms.status !== "pending_approval") {
+        return res.status(400).json({ message: "Only milestones pending approval can be rejected" });
+      }
+      ms.status     = "rejected";
+      ms.reviewNote = reviewNote || "";
+      job.activityLog.unshift({
+        label: `Milestone "${ms.title}" rejected by client`,
+        meta:  reviewNote || "Client rejected this milestone proposal",
+      });
+
+      if (job.assignedFreelancer) {
+        await createNotification({
+          userId:      job.assignedFreelancer,
+          type:        "JOB_APPLIED",
+          title:       "Milestone Rejected",
+          message:     `Client rejected your milestone "${ms.title}" for "${job.title}". ${reviewNote ? `Reason: ${reviewNote}` : ""}`,
+          referenceId: job._id,
+        });
+      }
+
+    } else if (action === "approve") {
+      // ✅ FIX: guard — this approves SUBMITTED WORK only, not proposals
+      if (ms.status !== "submitted") {
+        return res.status(400).json({ message: "Only submitted work can be approved" });
+      }
       ms.status     = "approved";
       ms.reviewNote = reviewNote || "";
       job.activityLog.unshift({
@@ -264,6 +423,9 @@ export const updateMilestoneStatus = async (req, res) => {
       }
 
     } else if (action === "request_changes") {
+      if (ms.status !== "submitted") {
+        return res.status(400).json({ message: "Changes can only be requested on submitted work" });
+      }
       ms.status     = "changes_requested";
       ms.reviewNote = reviewNote || "";
       job.activityLog.unshift({
@@ -308,8 +470,10 @@ export const submitMilestone = async (req, res) => {
 
     const ms = job.milestones.id(milestoneId);
     if (!ms) return res.status(404).json({ message: "Milestone not found" });
-    if (ms.status === "approved") {
-      return res.status(400).json({ message: "Milestone already approved" });
+
+    // ✅ FIX: can only submit work once the client has approved the proposal
+    if (!["in progress", "changes_requested"].includes(ms.status)) {
+      return res.status(400).json({ message: "This milestone is not ready for submission" });
     }
 
     const baseUrl       = `${req.protocol}://${req.get("host")}`;

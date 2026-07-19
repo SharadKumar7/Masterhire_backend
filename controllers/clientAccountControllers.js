@@ -1,9 +1,15 @@
 import User from "../models/User.js";
-import Wallet from "../models/wallet.js"; // ✅ NEW
+import Wallet from "../models/wallet.js";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import nodemailer from "nodemailer";
+import multer from "multer";
+import path from "path";
+import { fileURLToPath } from "url";
 import { createNotification } from "./notificationController.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
 
 // ── Email transporter ──────────────────────────────────────────────────────
 const transporter = nodemailer.createTransport({
@@ -26,6 +32,25 @@ const sendOTPEmail = async (toEmail, otp) => {
     `,
   });
 };
+
+// ─── Multer config for profile photo upload ───────────────────────────────
+// ✅ NEW — used on PATCH /personal so both text fields and the photo file
+// can be sent together via multipart/form-data.
+const photoStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, path.join(__dirname, "../uploads/profile/")),
+  filename:    (req, file, cb) => cb(null, `${req.user._id}-${Date.now()}${path.extname(file.originalname)}`),
+});
+
+export const uploadProfilePhoto = multer({
+  storage: photoStorage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    const allowed = /jpeg|jpg|png|webp|gif/;
+    const ext  = allowed.test(path.extname(file.originalname).toLowerCase());
+    const mime = allowed.test(file.mimetype);
+    cb(null, ext && mime);
+  },
+}).single("profilePhoto"); // field name — frontend FormData mein isi naam se append karna hoga
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /me
@@ -77,10 +102,21 @@ export const getProfile = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PATCH /personal
+// ✅ UPDATED — now accepts multipart/form-data too. If a file is uploaded
+// (req.file, via uploadProfilePhoto middleware), it takes priority over any
+// profilePhoto string sent in the body.
 // ─────────────────────────────────────────────────────────────────────────────
 export const updatePersonal = async (req, res) => {
   try {
-    const { fullName, email, phone, companyName, location, bio, profilePhoto } = req.body;
+    const { fullName, email, phone, companyName, location, bio } = req.body;
+
+    // ✅ Resolve profilePhoto — uploaded file wins, else fall back to body string
+    let profilePhoto;
+    if (req.file) {
+      profilePhoto = `/uploads/profile/${req.file.filename}`;
+    } else if (req.body.profilePhoto !== undefined) {
+      profilePhoto = req.body.profilePhoto;
+    }
 
     if (email && email !== req.user.email) {
       const exists = await User.findOne({ email, _id: { $ne: req.user._id } });
@@ -217,9 +253,8 @@ export const updateBillingAddress = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /add-funds — ✅ REMOVED (now handled by /api/payment/topup/*)
+// POST /add-funds — REMOVED (now handled by /api/payment/topup/*)
 // Frontend uses /api/payment/topup/create-order and /api/payment/topup/verify
-// This route is no longer needed
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────

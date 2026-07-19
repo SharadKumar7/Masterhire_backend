@@ -11,7 +11,9 @@ router.use(protect);
 router.get("/me", ctrl.getProfile);
 
 // Personal Details
-router.patch("/personal", ctrl.updatePersonal);
+// ✅ uploadProfilePhoto (multer) runs first — parses multipart/form-data,
+// puts text fields on req.body and the file (if any) on req.file
+router.patch("/personal", ctrl.uploadProfilePhoto, ctrl.updatePersonal);
 
 // Hiring Preferences
 router.patch("/hiring-preferences", ctrl.updateHiringPreferences);

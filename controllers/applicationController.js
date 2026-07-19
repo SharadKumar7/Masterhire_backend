@@ -7,7 +7,7 @@ import Negotiation from "../models/negotiation.js";
 import Job from "../models/Jobs.js";
 import Message from "../models/message.js";
 import HiredContract from "../models/HiredContract.js";
-import { createNotification } from "./notificationController.js"; // ✅ ADD THIS
+import { createNotification } from "./notificationController.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
@@ -185,19 +185,15 @@ export const getClientJobApplications = async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PATCH /api/client/:applicationId/status
-// ═══════════════════════════════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════════════════════════════
-// PATCH /api/client/:applicationId/status
-// Now usable by BOTH the client (owner of the job) and the freelancer
-// (owner of the application) — same route, same function, no duplication.
-// Freelancer is restricted to status: "accepted" only; reject/negotiate stay
-// client-only.
+// Usable by BOTH the client (owner of the job) and the freelancer (owner of
+// the application). Freelancer is restricted to status: "accepted" only;
+// reject/negotiate stay client-only.
 // ═══════════════════════════════════════════════════════════════════════════════
 export const updateApplicationStatus = async (req, res) => {
   try {
     const { applicationId } = req.params;
     const { status, bidAmount } = req.body;
-    const { userId, role } = req.user;   // 👈 role bhi lo, sirf clientId nahi
+    const { userId, role } = req.user;
     console.log("updateApplicationStatus called with:", { applicationId, status, bidAmount, userId, role });
 
     const validStatuses = ["accepted", "rejected", "negotiation"];
@@ -231,10 +227,21 @@ export const updateApplicationStatus = async (req, res) => {
       application.status = "accepted";
       await application.save();
 
+      // ✅ FIX: `returnDocument: "after"` is not a valid Mongoose option (it's
+      // the raw MongoDB driver's option name) and the result was previously
+      // discarded entirely. Now uses the correct `new: true` and captures the
+      // contract so its _id can be linked onto the Job.
+      const contract = await HiredContract.findOneAndUpdate(
+        { client: clientId, freelancer: freelancerId, jobTitle },
+        { client: clientId, freelancer: freelancerId, jobTitle, status: "active", finalAmount: application.bidAmount },
+        { upsert: true, new: true }
+      );
+
       await Job.findByIdAndUpdate(jobId, {
         status:             "assigned",
         assignedFreelancer: freelancerId,
         isPublic:           false,
+        hiredContract:      contract._id, // ✅ NEW — direct link, replaces fragile title-matching lookups
       });
 
       await Application.updateMany(
@@ -242,15 +249,8 @@ export const updateApplicationStatus = async (req, res) => {
         { $set: { status: "rejected" } }
       );
 
-      await HiredContract.findOneAndUpdate(
-        { client: clientId, freelancer: freelancerId, jobTitle },
-        { client: clientId, freelancer: freelancerId, jobTitle, status: "active", finalAmount: application.bidAmount },
-        { upsert: true, returnDocument: "after" }
-      );
-
       // Notify whichever side did NOT trigger the accept
       if (isFreelancer) {
-        // ✅ Client ko — freelancer ne accept kiya
         await createNotification({
           userId:      clientId,
           type:        "JOB_ASSIGNED",
@@ -259,7 +259,6 @@ export const updateApplicationStatus = async (req, res) => {
           referenceId: jobId,
         });
       } else {
-        // ✅ Freelancer ko — client ne hire kiya (existing behavior, unchanged)
         await createNotification({
           userId:      freelancerId,
           type:        "JOB_ASSIGNED",
@@ -284,7 +283,6 @@ export const updateApplicationStatus = async (req, res) => {
       application.status = "rejected";
       await application.save();
 
-      // ✅ Freelancer ko — rejection notification
       await createNotification({
         userId:      freelancerId,
         type:        "JOB_APPLIED",
@@ -308,7 +306,6 @@ export const updateApplicationStatus = async (req, res) => {
     if (status === "negotiation" && bidAmount) {
       application.bidAmount = bidAmount;
 
-      // ✅ Freelancer ko — counter offer notification
       await createNotification({
         userId:      freelancerId,
         type:        "JOB_APPLIED",
@@ -391,10 +388,9 @@ export const submitClientNegotiation = async (req, res) => {
     });
 
     application.status    = "negotiation";
-    application.bidAmount = Number(proposedAmount);   // ✅ NEW — bidAmount ko sync karo
+    application.bidAmount = Number(proposedAmount);
     await application.save();
 
-    // ✅ Freelancer ko — client ne counter offer bheja
     await createNotification({
       userId:      application.user,
       type:        "JOB_APPLIED",
@@ -538,8 +534,8 @@ export const getMessages = async (req, res) => {
     const normalized = messages.map((m) => ({
       _id:        m._id,
       text:       m.text,
-      senderId:   m.senderId.toString() === clientId ? "me" : m.senderId,
-      senderRole: m.senderId.toString() === clientId ? "client" : "freelancer",
+      senderId:   m.senderId.toString() === clientId.toString() ? "me" : m.senderId,
+      senderRole: m.senderId.toString() === clientId.toString() ? "client" : "freelancer",
       createdAt:  m.createdAt,
       isRead:     m.isRead,
       fileUrl:    m.fileUrl  || null,
@@ -589,7 +585,6 @@ export const sendMessage = async (req, res) => {
       isRead:     false,
     });
 
-    // ✅ Freelancer ko — client ne message bheja
     await createNotification({
       userId:      receiverId,
       type:        "NEW_MESSAGE",
@@ -673,13 +668,12 @@ export const negotiateApplication = async (req, res) => {
     await Negotiation.create({
       application:    applicationId,
       job:            application.job._id,
-      client:         application.job.clientId, 
+      client:         application.job.clientId,
       freelancer:     freelancerId,
       proposedAmount: Number(bidAmount),
       proposedBy:     "freelancer",
     });
 
-    // ✅ Client ko — freelancer ne counter offer bheja
     await createNotification({
       userId:      application.job.clientId,
       type:        "JOB_APPLIED",
@@ -795,7 +789,6 @@ export const sendFreelancerMessage = async (req, res) => {
       ...getFileInfo(req.file),
     });
 
-    // ✅ Client ko — freelancer ne message bheja
     await createNotification({
       userId:      job.clientId,
       type:        "NEW_MESSAGE",

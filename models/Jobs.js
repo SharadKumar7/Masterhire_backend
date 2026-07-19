@@ -10,10 +10,13 @@ const milestoneSchema = new mongoose.Schema(
     dueDate:      { type: Date,   required: true },
     deliverables: { type: String, default: "" },
 
+    // ✅ FIX: "pending" renamed to "pending_approval" — new milestones now wait
+    // for client approval before the freelancer can submit work. "rejected"
+    // added for milestones the client declines at the proposal stage.
     status: {
       type:    String,
-      enum:    ["pending", "in progress", "submitted", "approved", "changes_requested"],
-      default: "pending",
+      enum:    ["pending_approval", "in progress", "submitted", "approved", "changes_requested", "rejected"],
+      default: "pending_approval",
     },
 
     submittedOn: { type: Date, default: null },
@@ -30,9 +33,22 @@ const milestoneSchema = new mongoose.Schema(
     ],
 
     // Payment
-    isPaid:   { type: Boolean, default: false },
-    paidAt:   { type: Date,    default: null },
-    paidAmount: { type: Number, default: 0 },
+    isPaid:     { type: Boolean, default: false },
+    paidAt:     { type: Date,    default: null },
+    paidAmount: { type: Number,  default: 0 },
+    escrowStatus: {
+      type:    String,
+      enum:    ["pending", "held", "released", "refunded"],
+      default: "pending",
+    },
+    razorpayOrderId:   { type: String, default: null },
+    razorpayPaymentId: { type: String, default: null },
+
+    // ✅ NEW — client-side charge breakdown, captured at payment time so
+    // approval/refund/release logic never has to recompute fee/GST later.
+    clientPlatformFee: { type: Number, default: 0 }, // 5% of milestone budget, charged to client
+    clientGST:          { type: Number, default: 0 }, // 18% GST on clientPlatformFee
+    clientTotalPaid:    { type: Number, default: 0 }, // budget + clientPlatformFee + clientGST
 
     // Client review note
     reviewNote: { type: String, default: "" },
@@ -42,15 +58,15 @@ const milestoneSchema = new mongoose.Schema(
 
 // ─── File Sub-Schema ──────────────────────────────────────────────────────────
 const fileSchema = new mongoose.Schema({
-  name:        { type: String, required: true },
-  url:         { type: String, required: true },
-  size:        { type: String, default: "" },
-  fileType:    { type: String, default: "document" }, // "image" | "video" | "document"
-  uploadedBy:  { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-  uploaderRole:{ type: String, enum: ["client", "freelancer"], default: "client" },
-  source:      { type: String, enum: ["client", "milestone"], default: "client" },
-  milestoneId: { type: mongoose.Schema.Types.ObjectId, default: null }, // if from milestone
-  uploadedAt:  { type: Date, default: Date.now },
+  name:         { type: String, required: true },
+  url:          { type: String, required: true },
+  size:         { type: String, default: "" },
+  fileType:     { type: String, default: "document" }, // "image" | "video" | "document"
+  uploadedBy:   { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  uploaderRole: { type: String, enum: ["client", "freelancer"], default: "client" },
+  source:       { type: String, enum: ["client", "milestone"], default: "client" },
+  milestoneId:  { type: mongoose.Schema.Types.ObjectId, default: null }, // if from milestone
+  uploadedAt:   { type: Date, default: Date.now },
 });
 
 // ─── Activity Log Sub-Schema ──────────────────────────────────────────────────
@@ -99,20 +115,30 @@ const jobSchema = new mongoose.Schema(
       default: null,
     },
 
+    // ✅ NEW — direct link to the accepted HiredContract. Set once when the
+    // application is accepted (see applicationController.js). Replaces the
+    // fragile client+freelancer+jobTitle lookup that could match the wrong
+    // contract when a client hires the same freelancer more than once.
+    hiredContract: {
+      type:    mongoose.Schema.Types.ObjectId,
+      ref:     "HiredContract",
+      default: null,
+    },
+
     isPublic:   { type: Boolean, default: true },
     proposals:  { type: Number,  default: 0 },
     postedTime: { type: Date,    default: Date.now },
 
-    // ── NEW: Milestones ──────────────────────────────────────────────────────
+    // ── Milestones ────────────────────────────────────────────────────────────
     milestones: [milestoneSchema],
 
-    // ── NEW: All files (client-uploaded + milestone-submitted mirror) ────────
+    // ── All files (client-uploaded + milestone-submitted mirror) ─────────────
     files: [fileSchema],
 
-    // ── NEW: Activity log ────────────────────────────────────────────────────
+    // ── Activity log ──────────────────────────────────────────────────────────
     activityLog: [activitySchema],
 
-    // ── NEW: Project start date (set when freelancer is assigned) ────────────
+    // ── Project start date (set when freelancer is assigned) ─────────────────
     startedAt: { type: Date, default: null },
   },
   { timestamps: true }
